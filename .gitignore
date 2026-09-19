@@ -1,0 +1,40 @@
+# Binaries
+/bin/
+/cmd/*/main
+*.exe
+
+# Dependencies
+vendor/
+node_modules/
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+*.out
+
+# Test coverage
+coverage.out
+coverage.html
+
+# Temporal
+temporal.db
