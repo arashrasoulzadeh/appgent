@@ -1,0 +1,68 @@
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/arashrasoulzadeh/appgent/internal/config"
+	"github.com/arashrasoulzadeh/appgent/internal/temporal"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/worker"
+)
+
+func main() {
+	cfg := config.Load()
+
+	ctx := context.Background()
+
+	// Connect to Temporal
+	c, err := client.Dial(client.Options{
+		HostPort:  cfg.TemporalHostPort,
+		Namespace: cfg.TemporalNamespace,
+	})
+	if err != nil {
+		log.Fatalf("Failed to connect to Temporal: %v", err)
+	}
+	defer c.Close()
+
+	// Connect to database
+	pool, err := pgxpool.New(ctx, cfg.PostgresDSN)
+	if err != nil {
+		log.Fatalf("Failed to connect to database: %v", err)
+	}
+	defer pool.Close()
+
+	// Create worker
+	w := worker.New(c, "appgent-generation", worker.Options{
+		MaxConcurrentActivityExecutionSize: 10,
+	})
+
+	// Register workflow and activities
+	w.RegisterWorkflow(temporal.GenerateAppWorkflow)
+	w.RegisterActivity(temporal.PlanActivity)
+	w.RegisterActivity(temporal.DesignActivity)
+	w.RegisterActivity(temporal.CodeActivity)
+	w.RegisterActivity(temporal.QAActivity)
+	w.RegisterActivity(temporal.PersistRunResultActivity)
+
+	// Start worker
+	err = w.Start()
+	if err != nil {
+		log.Fatalf("Failed to start worker: %v", err)
+	}
+
+	log.Println("Temporal worker started on task queue: appgent-generation")
+
+	// Wait for shutdown signal
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	log.Println("Shutting down worker...")
+	w.Stop()
+	log.Println("Worker stopped")
+}
