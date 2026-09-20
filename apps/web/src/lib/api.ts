@@ -159,6 +159,7 @@ export interface Run {
   status: 'queued' | 'running' | 'succeeded' | 'needs_review' | 'failed'
   user_prompt: string
   created_at: string
+  finished_at?: string
 }
 
 export interface AgentStep {
@@ -170,6 +171,7 @@ export interface AgentStep {
   started_at?: string
   finished_at?: string
   output_summary?: string
+  error?: string
 }
 
 export interface Deployment {
@@ -177,6 +179,7 @@ export interface Deployment {
   url: string
   status: 'deploying' | 'live' | 'failed' | 'retired'
   deployed_at?: string
+  created_at: string
 }
 
 export interface CreateAppRequest {
