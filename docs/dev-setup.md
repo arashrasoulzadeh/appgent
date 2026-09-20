@@ -13,49 +13,57 @@ cp .env.example .env
 docker compose up -d postgres temporal minio
 ```
 
-This starts (host ports deliberately non-standard, to avoid colliding with
-other services already running on a shared box — see
-[docs/environment.md](environment.md) for the full port table):
-- **postgres** (host `25432` → container `5432`) — primary DB, also hosts `pgvector`
-- **temporal** — Temporal dev server (Web UI on host `28233`)
-- **minio** (host `29000` API / `29001` console) — S3-compatible object storage for generated bundles
-
-Run migrations (`internal/db/migrations`) against `POSTGRES_DSN` using
-whichever migration tool is chosen (`golang-migrate` recommended):
+This starts postgres/temporal/minio with **no host port bindings** — they're
+internal-only, see [docs/environment.md](environment.md). For local dev
+against them directly (e.g. `psql`, `go run ./services/api`), either add a
+temporary port mapping yourself or use `docker compose exec`. For the
+Temporal Web UI, bring up the authenticated proxy too:
 
 ```bash
-migrate -database "$POSTGRES_DSN" -path internal/db/migrations up
+docker compose --profile tools run --rm temporal-ui-htpasswd
+docker compose up -d temporal-ui temporal-ui-proxy
+```
+Then it's at `http://localhost:28233`, prompting for the
+`TEMPORAL_UI_USER`/`TEMPORAL_UI_PASSWORD` from `.env`.
+
+Run migrations via the `migrate` tool service (works against the in-network
+`postgres`, no host port needed):
+
+```bash
+docker compose --profile tools run --rm migrate
 ```
 
 Seed the MVP admin user (`ADMIN_SEED_EMAIL` / `ADMIN_SEED_PASSWORD` from
 `.env`, bcrypt-hashed at seed time):
 
 ```bash
-go run ./cmd/seed
+docker compose --profile tools run --rm seed
 ```
 
 ## Run the services
 
+Since postgres/temporal/minio have no host ports (see above), running
+`api`/`worker` natively via `go run` won't resolve their Docker-network
+hostnames. Either run them in Compose too (`docker compose up -d --build api
+worker`), or temporarily add host port mappings under `postgres`/`temporal`/
+`minio` in `docker-compose.yml` for local iteration and point `.env` at
+`localhost:<port>` instead. `web` still runs natively fine, since it only
+talks to `api` over HTTP:
+
 ```bash
-# terminal 1
-go run ./services/api
+# via Compose (recommended)
+docker compose up -d --build api worker
 
-# terminal 2
-go run ./services/worker
-
-# terminal 3
+# terminal 1 — web only needs api reachable at NEXT_PUBLIC_API_BASE_URL
 cd apps/web && pnpm install && pnpm dev
 ```
 
 - Next.js: http://localhost:3000 (running natively via `pnpm dev`, its own default port)
-- API: http://localhost:8080 (running natively via `go run`, its own default port)
-- Temporal Web UI: http://localhost:28233
-- MinIO console: http://localhost:29001
+- API: http://localhost:28080 (running in Compose)
+- Temporal Web UI: http://localhost:28233 (via the authenticated proxy)
 
-Note: the Go/Next.js processes above run natively (not via `docker compose`),
-so they use their own default ports (8080/3000), independent of the
-Docker-only `api`/`web` container port mappings (28080/23000) used in
-[docs/deploy.md](deploy.md).
+Point `NEXT_PUBLIC_API_BASE_URL` in `.env` at `http://localhost:28080/api/v1`
+to match.
 
 ## Sanity check
 

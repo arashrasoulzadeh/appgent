@@ -8,12 +8,12 @@ Dockerfiles (`services/api/Dockerfile`, `services/worker/Dockerfile`,
 ## 1. Provision the server
 
 Any VPS with Docker + Docker Compose plugin installed (Ubuntu 22.04+
-recommended). Open ports `80`/`443` (reverse proxy) — do not expose the
-infra/app host ports (`25432`, `27233`, `28233`, `28080`, `29000`/`29001`,
-`23000`) publicly; they're for internal/compose-network use and admin access
-only (tunnel or firewall-restrict them). These are deliberately non-standard
-port numbers to avoid colliding with anything else already running on a
-shared host — see [docs/environment.md](environment.md) for the full table.
+recommended). Open ports `80`/`443` (reverse proxy). Only three services bind
+a host port at all: `web` (`23000`), `api` (`28080`), and `temporal-ui-proxy`
+(`28233`, HTTP Basic Auth) — `postgres`, `temporal`, and `minio` have no host
+port binding whatsoever, so there's nothing to firewall-restrict for them;
+they're reachable only from other containers on the compose network. See
+[docs/environment.md](environment.md) for the full breakdown.
 
 ## 2. Get the code onto the server
 
@@ -30,10 +30,11 @@ cp .env.example .env
 
 Edit `.env` and set **real production values**, at minimum:
 - `JWT_SIGNING_SECRET` — long random value, never the placeholder
-- `ADMIN_SEED_PASSWORD` — change from `admin`
+- `ADMIN_SEED_PASSWORD` — change from the placeholder
 - `AI_API_KEY` / `OPENROUTER_API_KEY` — your real OpenRouter key
 - `CORS_ALLOWED_ORIGIN` — your real domain, e.g. `https://appgent.example.com`
 - `NEXT_PUBLIC_API_BASE_URL` — your real public API URL, e.g. `https://appgent.example.com/api/v1`
+- `TEMPORAL_UI_USER` / `TEMPORAL_UI_PASSWORD` — Basic Auth credentials for the Temporal Web UI, change from the placeholder
 
 `POSTGRES_DSN` set inside `docker-compose.yml` for the `api`/`worker`
 services already points at the in-network `postgres` host — you don't need
@@ -46,6 +47,8 @@ to edit that one for the compose deployment; it's only relevant if you run
 docker compose up -d postgres temporal temporal-ui minio
 docker compose --profile tools run --rm migrate
 docker compose --profile tools run --rm seed
+docker compose --profile tools run --rm temporal-ui-htpasswd
+docker compose up -d temporal-ui-proxy
 ```
 
 ## 5. Build and start the app services
@@ -94,9 +97,18 @@ docker compose up -d --build api worker web
 
 ## Notes
 
-- The `migrate` and `seed` services use Compose `profiles: ["tools"]` so
-  `docker compose up -d` never runs them automatically — invoke them
-  explicitly as one-off commands.
+- The `migrate`, `seed`, and `temporal-ui-htpasswd` services use Compose
+  `profiles: ["tools"]` so `docker compose up -d` never runs them
+  automatically — invoke them explicitly as one-off commands.
+- If you change `TEMPORAL_UI_USER`/`TEMPORAL_UI_PASSWORD` later, re-run
+  `docker compose --profile tools run --rm temporal-ui-htpasswd` then
+  `docker compose up -d temporal-ui-proxy` to pick it up — nginx doesn't
+  watch the `.htpasswd` file for changes on its own within a running
+  container, though a plain restart (`docker compose restart
+  temporal-ui-proxy`) is enough since it re-reads the file on start.
+- `postgres`, `temporal`, and `minio` have no host port — admin access is via
+  `docker compose exec postgres psql -U appgent -d appgent`,
+  `docker compose exec minio ...`, or similar, not from outside the host.
 - Sandbox/preview provisioning (§ [open-questions.md](open-questions.md))
   isn't part of this compose file yet — resolving that decision may add
   another service or external dependency here.
