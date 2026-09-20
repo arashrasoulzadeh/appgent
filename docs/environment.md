@@ -14,13 +14,13 @@ avoid colliding with other services already running on a shared box:
 
 | Service | Host port | Container port | Purpose |
 |---|---|---|---|
-| postgres | `15432` | `5432` | direct DB access (admin/debugging only) |
-| temporal | `17233` | `7233` | Temporal gRPC frontend |
-| temporal-ui | `18233` | `8080` | Temporal Web UI |
-| minio | `19000` | `9000` | S3 API |
-| minio | `19001` | `9001` | MinIO console |
-| api | `18080` | `8080` | REST API (put behind reverse proxy for public access) |
-| web | `13000` | `3000` | Next.js (put behind reverse proxy for public access) |
+| postgres | `25432` | `5432` | direct DB access (admin/debugging only) |
+| temporal | `27233` | `7233` | Temporal gRPC frontend |
+| temporal-ui | `28233` | `8080` | Temporal Web UI |
+| minio | `29000` | `9000` | S3 API |
+| minio | `29001` | `9001` | MinIO console |
+| api | `28080` | `8080` | REST API (put behind reverse proxy for public access) |
+| web | `23000` | `3000` | Next.js (put behind reverse proxy for public access) |
 
 Container-to-container env vars (`POSTGRES_DSN`, `TEMPORAL_HOST_PORT`,
 `OBJECT_STORAGE_ENDPOINT` below) always use the **container** port and the
@@ -49,7 +49,7 @@ host, a reverse proxy).
 | `JWT_SIGNING_SECRET` | `change-me-in-prod` | signs the session cookie |
 | `SESSION_COOKIE_NAME` | `session` | |
 | `SESSION_TTL_HOURS` | `168` | |
-| `CORS_ALLOWED_ORIGIN` | `http://localhost:13000` | Next.js origin (or your public domain in prod) |
+| `CORS_ALLOWED_ORIGIN` | `http://localhost:23000` | Next.js origin (or your public domain in prod) |
 | `ADMIN_SEED_EMAIL` | `admin` | used by the seed migration/script |
 | `ADMIN_SEED_PASSWORD` | `admin` | plaintext only in local `.env`; hashed at seed time, never stored plain |
 
@@ -70,7 +70,7 @@ host, a reverse proxy).
 
 | Var | Example | Notes |
 |---|---|---|
-| `NEXT_PUBLIC_API_BASE_URL` | `http://localhost:18080/api/v1` | or your public API domain in prod |
+| `NEXT_PUBLIC_API_BASE_URL` | `http://localhost:28080/api/v1` | or your public API domain in prod |
 
 ## Deferred (sandbox runtime dependent)
 

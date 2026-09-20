@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: appgent
       POSTGRES_DB: appgent
     ports:
-      - "15432:5432"
+      - "25432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
@@ -23,18 +23,18 @@ services:
     depends_on:
       - postgres
     ports:
-      - "17233:7233"
+      - "27233:7233"
 
   temporal-ui:
     image: temporalio/ui:latest
     restart: unless-stopped
     environment:
       TEMPORAL_ADDRESS: temporal:7233
-      TEMPORAL_CORS_ORIGINS: http://localhost:13000
+      TEMPORAL_CORS_ORIGINS: http://localhost:23000
     depends_on:
       - temporal
     ports:
-      - "18233:8080"
+      - "28233:8080"
 
   minio:
     image: quay.io/minio/minio:latest
@@ -44,8 +44,8 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     ports:
-      - "19000:9000"
-      - "19001:9001"
+      - "29000:9000"
+      - "29001:9001"
     volumes:
       - minio_data:/data
 
@@ -92,7 +92,7 @@ services:
       - temporal
       - minio
     ports:
-      - "18080:8080"
+      - "28080:8080"
 
   worker:
     build:
@@ -114,11 +114,11 @@ services:
       context: ./apps/web
     restart: unless-stopped
     environment:
-      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:18080/api/v1}
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:28080/api/v1}
     depends_on:
       - api
     ports:
-      - "13000:3000"
+      - "23000:3000"
 
 volumes:
   postgres_data:

@@ -1,22 +1,22 @@
 services:
   postgres:
     ports:
-      - "15432:5432"
+      - "25432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
   temporal:
     ports:
-      - "17233:7233"
+      - "27233:7233"
 
   temporal-ui:
     ports:
-      - "18233:8080"
+      - "28233:8080"
 
   minio:
     ports:
-      - "19000:9000"
-      - "19001:9001"
+      - "29000:9000"
+      - "29001:9001"
 
 volumes:
   postgres_data:

@@ -9,8 +9,8 @@ Dockerfiles (`services/api/Dockerfile`, `services/worker/Dockerfile`,
 
 Any VPS with Docker + Docker Compose plugin installed (Ubuntu 22.04+
 recommended). Open ports `80`/`443` (reverse proxy) — do not expose the
-infra/app host ports (`15432`, `17233`, `18233`, `18080`, `19000`/`19001`,
-`13000`) publicly; they're for internal/compose-network use and admin access
+infra/app host ports (`25432`, `27233`, `28233`, `28080`, `29000`/`29001`,
+`23000`) publicly; they're for internal/compose-network use and admin access
 only (tunnel or firewall-restrict them). These are deliberately non-standard
 port numbers to avoid colliding with anything else already running on a
 shared host — see [docs/environment.md](environment.md) for the full table.

@@ -16,9 +16,9 @@ docker compose up -d postgres temporal minio
 This starts (host ports deliberately non-standard, to avoid colliding with
 other services already running on a shared box — see
 [docs/environment.md](environment.md) for the full port table):
-- **postgres** (host `15432` → container `5432`) — primary DB, also hosts `pgvector`
-- **temporal** — Temporal dev server (Web UI on host `18233`)
-- **minio** (host `19000` API / `19001` console) — S3-compatible object storage for generated bundles
+- **postgres** (host `25432` → container `5432`) — primary DB, also hosts `pgvector`
+- **temporal** — Temporal dev server (Web UI on host `28233`)
+- **minio** (host `29000` API / `29001` console) — S3-compatible object storage for generated bundles
 
 Run migrations (`internal/db/migrations`) against `POSTGRES_DSN` using
 whichever migration tool is chosen (`golang-migrate` recommended):
@@ -49,12 +49,12 @@ cd apps/web && pnpm install && pnpm dev
 
 - Next.js: http://localhost:3000 (running natively via `pnpm dev`, its own default port)
 - API: http://localhost:8080 (running natively via `go run`, its own default port)
-- Temporal Web UI: http://localhost:18233
-- MinIO console: http://localhost:19001
+- Temporal Web UI: http://localhost:28233
+- MinIO console: http://localhost:29001
 
 Note: the Go/Next.js processes above run natively (not via `docker compose`),
 so they use their own default ports (8080/3000), independent of the
-Docker-only `api`/`web` container port mappings (18080/13000) used in
+Docker-only `api`/`web` container port mappings (28080/23000) used in
 [docs/deploy.md](deploy.md).
 
 ## Sanity check
