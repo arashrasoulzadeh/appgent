@@ -70,7 +70,14 @@ host, a reverse proxy).
 
 | Var | Example | Notes |
 |---|---|---|
-| `NEXT_PUBLIC_API_BASE_URL` | `http://localhost:28080/api/v1` | or your public API domain in prod |
+| `NEXT_PUBLIC_API_BASE_URL` | `http://localhost:28080/api/v1` | or your public API domain in prod — see note below |
+
+`NEXT_PUBLIC_*` vars are inlined into the JS bundle at `next build` time, not
+read at container runtime. `docker-compose.yml` passes this one through as a
+Docker build arg (`build.args`) as well as a runtime env var, so changing it
+in `.env` requires rebuilding the `web` image (`docker compose up -d --build
+web`), not just restarting the container — a plain restart keeps whatever
+value was baked in at the last build.
 
 ## Deferred (sandbox runtime dependent)
 

@@ -6,6 +6,8 @@ COPY pnpm-lock.yaml package.json ./
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 COPY . .
+ARG NEXT_PUBLIC_API_BASE_URL
+ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL
 RUN --mount=type=cache,target=/app/.next/cache \
     pnpm build
 
