@@ -15,7 +15,6 @@ import (
 	"github.com/arashrasoulzadeh/appgent/internal/middleware"
 	"github.com/arashrasoulzadeh/appgent/internal/services"
 	"github.com/arashrasoulzadeh/appgent/internal/auth"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func main() {
@@ -30,11 +29,9 @@ func main() {
 	pool := db.MustNewPool(ctx, cfg.PostgresDSN)
 	defer pool.Close()
 
-	// Run migrations
-	if err := runMigrations(ctx, pool); err != nil {
-		log.Error("Failed to run migrations", "error", err)
-		os.Exit(1)
-	}
+	// Schema migrations are applied out-of-band via the `migrate` service
+	// (see docs/deploy.md / docs/dev-setup.md) against internal/db/migrations,
+	// not by the API process itself.
 
 	// Initialize services
 	tokenService := auth.NewTokenService(
@@ -133,164 +130,3 @@ func main() {
 	}
 	log.Info("Server stopped")
 }
-
-func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
-	_, err := pool.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS schema_migrations (
-			version TEXT PRIMARY KEY,
-			applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-		)
-	`)
-	if err != nil {
-		return err
-	}
-
-	migrations := []struct {
-		version string
-		sql     string
-	}{
-		{"0001_users", usersMigration},
-		{"0002_apps", appsMigration},
-		{"0003_generation_runs", generationRunsMigration},
-		{"0004_agent_steps", agentStepsMigration},
-		{"0005_deployments", deploymentsMigration},
-		{"0006_design_patterns", designPatternsMigration},
-	}
-
-	for _, m := range migrations {
-		var applied bool
-		err := pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = $1)", m.version).Scan(&applied)
-		if err != nil {
-			return err
-		}
-		if applied {
-			continue
-		}
-
-		tx, err := pool.Begin(ctx)
-		if err != nil {
-			return err
-		}
-
-		_, err = tx.Exec(ctx, m.sql)
-		if err != nil {
-			tx.Rollback(ctx)
-			return err
-		}
-
-		_, err = tx.Exec(ctx, "INSERT INTO schema_migrations (version) VALUES ($1)", m.version)
-		if err != nil {
-			tx.Rollback(ctx)
-			return err
-		}
-
-		if err := tx.Commit(ctx); err != nil {
-			return err
-		}
-
-		logger.DefaultLogger.Info("Applied migration", "version", m.version)
-	}
-
-	return nil
-}
-
-const usersMigration = `
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
-
-CREATE TABLE IF NOT EXISTS users (
-    id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    email         text UNIQUE NOT NULL,
-    password_hash text NOT NULL,
-    created_at    timestamptz NOT NULL DEFAULT now()
-);
-`
-
-const appsMigration = `
-CREATE TYPE app_kind AS ENUM ('website', 'pwa');
-CREATE TYPE app_status AS ENUM ('draft', 'generating', 'ready', 'needs_review', 'failed');
-
-CREATE TABLE IF NOT EXISTS apps (
-    id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id    uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    name       text NOT NULL,
-    slug       text UNIQUE NOT NULL,
-    kind       app_kind NOT NULL,
-    status     app_status NOT NULL DEFAULT 'draft',
-    created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_apps_user_id ON apps(user_id);
-`
-
-const generationRunsMigration = `
-CREATE TYPE run_status AS ENUM ('queued', 'running', 'succeeded', 'needs_review', 'failed');
-
-CREATE TABLE IF NOT EXISTS generation_runs (
-    id                    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    app_id                uuid NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
-    version               int NOT NULL,
-    user_prompt           text NOT NULL,
-    status                run_status NOT NULL DEFAULT 'queued',
-    temporal_workflow_id  text NOT NULL,
-    bundle_path           text,
-    preview_url           text,
-    error                 text,
-    started_at            timestamptz,
-    finished_at           timestamptz,
-    created_at            timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (app_id, version)
-);
-CREATE INDEX IF NOT EXISTS idx_generation_runs_app_id ON generation_runs(app_id);
-`
-
-const agentStepsMigration = `
-CREATE TYPE agent_type AS ENUM ('plan', 'design', 'code', 'qa');
-CREATE TYPE agent_step_status AS ENUM ('pending', 'running', 'succeeded', 'failed');
-
-CREATE TABLE IF NOT EXISTS agent_steps (
-    id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    run_id       uuid NOT NULL REFERENCES generation_runs(id) ON DELETE CASCADE,
-    agent_type   agent_type NOT NULL,
-    attempt      int NOT NULL DEFAULT 1,
-    input        jsonb NOT NULL,
-    output       jsonb,
-    model_used   text NOT NULL,
-    tokens_used  int,
-    status       agent_step_status NOT NULL DEFAULT 'pending',
-    error        text,
-    started_at   timestamptz,
-    finished_at  timestamptz,
-    created_at   timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_agent_steps_run_id ON agent_steps(run_id);
-`
-
-const deploymentsMigration = `
-CREATE TYPE deployment_status AS ENUM ('deploying', 'live', 'failed', 'retired');
-
-CREATE TABLE IF NOT EXISTS deployments (
-    id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    app_id       uuid NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
-    run_id       uuid NOT NULL REFERENCES generation_runs(id) ON DELETE CASCADE,
-    url          text,
-    status       deployment_status NOT NULL DEFAULT 'deploying',
-    deployed_at  timestamptz,
-    created_at   timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_deployments_app_id ON deployments(app_id);
-`
-
-const designPatternsMigration = `
-CREATE EXTENSION IF NOT EXISTS vector;
-
-CREATE TABLE IF NOT EXISTS design_patterns (
-    id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    kind       text NOT NULL,
-    title      text NOT NULL,
-    content    text NOT NULL,
-    embedding  vector(1536) NOT NULL,
-    created_at timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_design_patterns_embedding ON design_patterns
-    USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
-`
