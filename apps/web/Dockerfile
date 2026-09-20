@@ -1,16 +1,13 @@
 # syntax=docker/dockerfile:1
-FROM node:20-alpine AS deps
-WORKDIR /app
-COPY pnpm-lock.yaml package.json ./
-RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
-    corepack enable && pnpm install --frozen-lockfile
-
 FROM node:20-alpine AS build
 WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
+RUN corepack enable
+COPY pnpm-lock.yaml package.json ./
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile
 COPY . .
 RUN --mount=type=cache,target=/app/.next/cache \
-    corepack enable && pnpm build
+    pnpm build
 
 FROM node:20-alpine AS run
 WORKDIR /app
