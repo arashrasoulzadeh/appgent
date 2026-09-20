@@ -9,16 +9,18 @@ import (
 	"text/template"
 
 	"github.com/arashrasoulzadeh/appgent/internal/openrouter"
+	"github.com/arashrasoulzadeh/appgent/internal/rag"
 	"github.com/arashrasoulzadeh/appgent/internal/temporal"
 )
 
 type DesignAgent struct {
-	client  *openrouter.Client
-	model   string
-	prompt  *template.Template
+	client   *openrouter.Client
+	model    string
+	prompt   *template.Template
+	ragSvc   *rag.Service
 }
 
-func NewDesignAgent(client *openrouter.Client, model string) (*DesignAgent, error) {
+func NewDesignAgent(client *openrouter.Client, model string, ragSvc *rag.Service) (*DesignAgent, error) {
 	promptPath := "internal/agents/prompts/design.tmpl"
 	if _, err := os.Stat(promptPath); os.IsNotExist(err) {
 		promptPath = "../../../internal/agents/prompts/design.tmpl"
@@ -27,12 +29,34 @@ func NewDesignAgent(client *openrouter.Client, model string) (*DesignAgent, erro
 	if err != nil {
 		return nil, fmt.Errorf("parse design template: %w", err)
 	}
-	return &DesignAgent{client: client, model: model, prompt: tmpl}, nil
+	return &DesignAgent{client: client, model: model, prompt: tmpl, ragSvc: ragSvc}, nil
 }
 
 func (a *DesignAgent) Execute(ctx context.Context, in temporal.DesignInput) (temporal.DesignOutput, error) {
+	// Query RAG for similar design patterns if service is available
+	var ragContext []temporal.DesignPattern
+	if a.ragSvc != nil {
+		queryText := fmt.Sprintf("Design for app with style: %s. Pages: %d, Components: %d", 
+			in.Spec.StyleDirection, len(in.Spec.Pages), len(in.Spec.Components))
+		patterns, err := a.ragSvc.QuerySimilar(ctx, queryText, 3)
+		if err == nil {
+			ragContext = patterns
+		}
+	}
+
+	// Add RAG context to the input
+	type DesignInputWithRAG struct {
+		temporal.DesignInput
+		RAGContext []temporal.DesignPattern
+	}
+
+	inputWithRAG := DesignInputWithRAG{
+		DesignInput: in,
+		RAGContext:  ragContext,
+	}
+
 	var buf bytes.Buffer
-	err := a.prompt.Execute(&buf, in)
+	err := a.prompt.Execute(&buf, inputWithRAG)
 	if err != nil {
 		return temporal.DesignOutput{}, fmt.Errorf("execute template: %w", err)
 	}

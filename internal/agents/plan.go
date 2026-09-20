@@ -9,16 +9,18 @@ import (
 	"text/template"
 
 	"github.com/arashrasoulzadeh/appgent/internal/openrouter"
+	"github.com/arashrasoulzadeh/appgent/internal/rag"
 	"github.com/arashrasoulzadeh/appgent/internal/temporal"
 )
 
 type PlanAgent struct {
-	client  *openrouter.Client
-	model   string
-	prompt  *template.Template
+	client   *openrouter.Client
+	model    string
+	prompt   *template.Template
+	ragSvc   *rag.Service
 }
 
-func NewPlanAgent(client *openrouter.Client, model string) (*PlanAgent, error) {
+func NewPlanAgent(client *openrouter.Client, model string, ragSvc *rag.Service) (*PlanAgent, error) {
 	promptPath := "internal/agents/prompts/plan.tmpl"
 	if _, err := os.Stat(promptPath); os.IsNotExist(err) {
 		promptPath = "../../../internal/agents/prompts/plan.tmpl"
@@ -27,12 +29,28 @@ func NewPlanAgent(client *openrouter.Client, model string) (*PlanAgent, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse plan template: %w", err)
 	}
-	return &PlanAgent{client: client, model: model, prompt: tmpl}, nil
+	return &PlanAgent{client: client, model: model, prompt: tmpl, ragSvc: ragSvc}, nil
 }
 
 func (a *PlanAgent) Execute(ctx context.Context, in temporal.PlanInput) (temporal.PlanOutput, error) {
+	// Query RAG for similar patterns if service is available
+	var ragContext []temporal.DesignPattern
+	if a.ragSvc != nil {
+		queryText := fmt.Sprintf("App kind: %s. User prompt: %s", in.AppKind, in.UserPrompt)
+		patterns, err := a.ragSvc.QuerySimilar(ctx, queryText, 5)
+		if err == nil {
+			ragContext = patterns
+		}
+	}
+
+	inputWithRAG := temporal.PlanInput{
+		AppKind:    in.AppKind,
+		UserPrompt: in.UserPrompt,
+		RAGContext: ragContext,
+	}
+
 	var buf bytes.Buffer
-	err := a.prompt.Execute(&buf, in)
+	err := a.prompt.Execute(&buf, inputWithRAG)
 	if err != nil {
 		return temporal.PlanOutput{}, fmt.Errorf("execute template: %w", err)
 	}
@@ -42,7 +60,6 @@ func (a *PlanAgent) Execute(ctx context.Context, in temporal.PlanInput) (tempora
 		{Role: "user", Content: buf.String()},
 	}
 
-	// Define JSON schema for structured output
 	schema := map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{

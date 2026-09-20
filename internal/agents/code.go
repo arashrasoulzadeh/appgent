@@ -10,16 +10,18 @@ import (
 	"text/template"
 
 	"github.com/arashrasoulzadeh/appgent/internal/openrouter"
+	"github.com/arashrasoulzadeh/appgent/internal/rag"
 	"github.com/arashrasoulzadeh/appgent/internal/temporal"
 )
 
 type CodeAgent struct {
-	client  *openrouter.Client
-	model   string
-	prompt  *template.Template
+	client   *openrouter.Client
+	model    string
+	prompt   *template.Template
+	ragSvc   *rag.Service
 }
 
-func NewCodeAgent(client *openrouter.Client, model string) (*CodeAgent, error) {
+func NewCodeAgent(client *openrouter.Client, model string, ragSvc *rag.Service) (*CodeAgent, error) {
 	promptPath := "internal/agents/prompts/code.tmpl"
 	if _, err := os.Stat(promptPath); os.IsNotExist(err) {
 		promptPath = "../../../internal/agents/prompts/code.tmpl"
@@ -31,12 +33,33 @@ func NewCodeAgent(client *openrouter.Client, model string) (*CodeAgent, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse code template: %w", err)
 	}
-	return &CodeAgent{client: client, model: model, prompt: tmpl}, nil
+	return &CodeAgent{client: client, model: model, prompt: tmpl, ragSvc: ragSvc}, nil
 }
 
 func (a *CodeAgent) Execute(ctx context.Context, in temporal.CodeInput) (temporal.CodeOutput, error) {
+	// Query RAG for component patterns if service is available
+	var ragContext []temporal.DesignPattern
+	if a.ragSvc != nil && in.PriorFiles == nil { // Only on first pass
+		queryText := fmt.Sprintf("Components for: %s. Pages: %d", in.Spec.StyleDirection, len(in.Spec.Pages))
+		patterns, err := a.ragSvc.QuerySimilar(ctx, queryText, 3)
+		if err == nil {
+			ragContext = patterns
+		}
+	}
+
+	// Add RAG context to input
+	type CodeInputWithRAG struct {
+		temporal.CodeInput
+		RAGContext []temporal.DesignPattern
+	}
+
+	inputWithRAG := CodeInputWithRAG{
+		CodeInput:  in,
+		RAGContext: ragContext,
+	}
+
 	var buf bytes.Buffer
-	err := a.prompt.Execute(&buf, in)
+	err := a.prompt.Execute(&buf, inputWithRAG)
 	if err != nil {
 		return temporal.CodeOutput{}, fmt.Errorf("execute template: %w", err)
 	}
@@ -46,8 +69,6 @@ func (a *CodeAgent) Execute(ctx context.Context, in temporal.CodeInput) (tempora
 		{Role: "user", Content: buf.String()},
 	}
 
-	// We can't easily define a schema for arbitrary file maps, so we rely on prompt instructions
-	// and JSON parsing. The model should output a JSON object.
 	resp, err := a.client.ChatCompletion(ctx, openrouter.ChatCompletionRequest{
 		Model:       a.model,
 		Messages:    messages,
@@ -64,7 +85,6 @@ func (a *CodeAgent) Execute(ctx context.Context, in temporal.CodeInput) (tempora
 		return temporal.CodeOutput{}, fmt.Errorf("unmarshal code output: %w", err)
 	}
 
-	// Enforce max bundle size (~2MB)
 	totalSize := 0
 	for _, content := range files {
 		totalSize += len(content)

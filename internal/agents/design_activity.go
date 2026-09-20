@@ -16,7 +16,8 @@ func DesignActivity(ctx context.Context, in temporal.DesignInput) (temporal.Desi
 	}
 
 	client := openrouter.NewClient(apiKey, os.Getenv("OPENROUTER_BASE_URL"))
-	agent, err := NewDesignAgent(client, model)
+	ragSvc := getRAGService(ctx)
+	agent, err := NewDesignAgent(client, model, ragSvc)
 	if err != nil {
 		return temporal.DesignOutput{}, err
 	}

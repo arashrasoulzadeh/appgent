@@ -16,7 +16,8 @@ func CodeActivity(ctx context.Context, in temporal.CodeInput) (temporal.CodeOutp
 	}
 
 	client := openrouter.NewClient(apiKey, os.Getenv("OPENROUTER_BASE_URL"))
-	agent, err := NewCodeAgent(client, model)
+	ragSvc := getRAGService(ctx)
+	agent, err := NewCodeAgent(client, model, ragSvc)
 	if err != nil {
 		return temporal.CodeOutput{}, err
 	}
