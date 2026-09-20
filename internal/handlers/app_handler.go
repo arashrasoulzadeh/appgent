@@ -34,6 +34,9 @@ func (h *AppHandler) ListApps(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error": "failed to list apps"}`, http.StatusInternalServerError)
 		return
 	}
+	if apps == nil {
+		apps = []*services.App{}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"apps": apps})
@@ -234,6 +237,9 @@ func (h *AppHandler) ListRuns(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, `{"error": "failed to get runs"}`, http.StatusInternalServerError)
 		return
+	}
+	if runs == nil {
+		runs = []*services.Run{}
 	}
 
 	w.Header().Set("Content-Type", "application/json")

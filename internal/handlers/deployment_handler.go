@@ -100,6 +100,9 @@ func (h *DeploymentHandler) ListDeployments(w http.ResponseWriter, r *http.Reque
 		http.Error(w, `{"error": "failed to get deployments"}`, http.StatusInternalServerError)
 		return
 	}
+	if deployments == nil {
+		deployments = []*services.Deployment{}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"deployments": deployments})
