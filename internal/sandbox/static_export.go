@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/arashrasoulzadeh/appgent/internal/storage"
@@ -29,7 +30,7 @@ func (p *StaticExportProvisioner) Provision(ctx context.Context, runID uuid.UUID
 	prefix := fmt.Sprintf("runs/%s/", runID.String())
 	for path, content := range files {
 		objectName := prefix + path
-		_, err := p.storageClient.Upload(ctx, p.bucket, objectName, nil, int64(len(content)))
+		_, err := p.storageClient.Upload(ctx, p.bucket, objectName, strings.NewReader(content), int64(len(content)))
 		if err != nil {
 			return "", time.Time{}, fmt.Errorf("upload %s: %w", objectName, err)
 		}

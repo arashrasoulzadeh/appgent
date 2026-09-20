@@ -25,6 +25,16 @@ func getModelForAgent(agentType string) string {
 	return os.Getenv("AI_MODEL")
 }
 
+// modelOrDefault returns model if non-empty, otherwise a sensible default
+// model for the given provider (never the provider's own name, which is
+// not a valid model identifier).
+func modelOrDefault(model string, provider ai.Provider) string {
+	if model != "" {
+		return model
+	}
+	return ai.GetDefaultModelForProvider(provider.Name())
+}
+
 func getRAGService(ctx context.Context) *rag.Service {
 	dbURL := os.Getenv("POSTGRES_DSN")
 	if dbURL == "" {

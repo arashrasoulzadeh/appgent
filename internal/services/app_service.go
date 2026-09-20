@@ -243,6 +243,10 @@ func (s *AppService) Create(ctx context.Context, userID uuid.UUID, name, kind, p
 		UserPrompt: prompt,
 	})
 	if err != nil {
+		// The DB rows were already committed; mark them failed instead of
+		// leaving the app/run stuck in "generating"/"queued" forever.
+		s.pool.Exec(ctx, `UPDATE generation_runs SET status = 'failed', error = $2 WHERE id = $1`, run.ID, err.Error())
+		s.pool.Exec(ctx, `UPDATE apps SET status = 'failed', updated_at = now() WHERE id = $1`, app.ID)
 		return nil, nil, err
 	}
 
@@ -379,6 +383,10 @@ func (s *AppService) Regenerate(ctx context.Context, userID, appID uuid.UUID, pr
 		UserPrompt: prompt,
 	})
 	if err != nil {
+		// The DB rows were already committed; mark them failed instead of
+		// leaving the app/run stuck in "generating"/"queued" forever.
+		s.pool.Exec(ctx, `UPDATE generation_runs SET status = 'failed', error = $2 WHERE id = $1`, run.ID, err.Error())
+		s.pool.Exec(ctx, `UPDATE apps SET status = 'failed', updated_at = now() WHERE id = $1`, appID)
 		return nil, err
 	}
 
@@ -387,9 +395,12 @@ func (s *AppService) Regenerate(ctx context.Context, userID, appID uuid.UUID, pr
 
 func (s *AppService) GetRuns(ctx context.Context, userID, appID uuid.UUID) ([]*Run, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, app_id, version, user_prompt, status, temporal_workflow_id, bundle_path, preview_url, error, started_at, finished_at, created_at
-		FROM generation_runs WHERE app_id = $1 ORDER BY version DESC
-	`, appID)
+		SELECT r.id, r.app_id, r.version, r.user_prompt, r.status, r.temporal_workflow_id, r.bundle_path, r.preview_url, r.error, r.started_at, r.finished_at, r.created_at
+		FROM generation_runs r
+		JOIN apps a ON r.app_id = a.id
+		WHERE r.app_id = $1 AND a.user_id = $2
+		ORDER BY r.version DESC
+	`, appID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -411,9 +422,11 @@ func (s *AppService) GetRuns(ctx context.Context, userID, appID uuid.UUID) ([]*R
 func (s *AppService) GetRunWithSteps(ctx context.Context, userID, appID, runID uuid.UUID) (*Run, []*AgentStep, error) {
 	run := &Run{}
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, app_id, version, user_prompt, status, temporal_workflow_id, bundle_path, preview_url, error, started_at, finished_at, created_at
-		FROM generation_runs WHERE id = $1 AND app_id = $2
-	`, runID, appID).Scan(
+		SELECT r.id, r.app_id, r.version, r.user_prompt, r.status, r.temporal_workflow_id, r.bundle_path, r.preview_url, r.error, r.started_at, r.finished_at, r.created_at
+		FROM generation_runs r
+		JOIN apps a ON r.app_id = a.id
+		WHERE r.id = $1 AND r.app_id = $2 AND a.user_id = $3
+	`, runID, appID, userID).Scan(
 		&run.ID, &run.AppID, &run.Version, &run.UserPrompt, &run.Status, &run.TemporalWorkflowID,
 		&run.BundlePath, &run.PreviewURL, &run.Error, &run.StartedAt, &run.FinishedAt, &run.CreatedAt,
 	)
@@ -447,7 +460,15 @@ func (s *AppService) GetRunWithSteps(ctx context.Context, userID, appID, runID u
 	return run, steps, rows.Err()
 }
 
-func (s *AppService) CreateDeployment(ctx context.Context, appID, runID uuid.UUID) (*Deployment, error) {
+func (s *AppService) CreateDeployment(ctx context.Context, userID, appID, runID uuid.UUID) (*Deployment, error) {
+	var owns bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM apps WHERE id = $1 AND user_id = $2)`, appID, userID).Scan(&owns); err != nil {
+		return nil, err
+	}
+	if !owns {
+		return nil, ErrAppNotFound
+	}
+
 	deployment := &Deployment{}
 	err := s.pool.QueryRow(ctx, `
 		INSERT INTO deployments (app_id, run_id, status)
@@ -491,8 +512,11 @@ func (s *AppService) GetPreviewURL(ctx context.Context, userID, appID, runID uui
 	var previewURL sql.NullString
 	var expiresAt time.Time
 	err := s.pool.QueryRow(ctx, `
-		SELECT preview_url FROM generation_runs WHERE id = $1 AND app_id = $2
-	`, runID, appID).Scan(&previewURL)
+		SELECT r.preview_url
+		FROM generation_runs r
+		JOIN apps a ON r.app_id = a.id
+		WHERE r.id = $1 AND r.app_id = $2 AND a.user_id = $3
+	`, runID, appID, userID).Scan(&previewURL)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", time.Time{}, ErrRunNotFound

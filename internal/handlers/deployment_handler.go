@@ -57,8 +57,12 @@ func (h *DeploymentHandler) DeployApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deployment, err := h.appService.CreateDeployment(r.Context(), appID, latestRun.ID)
+	deployment, err := h.appService.CreateDeployment(r.Context(), userID, appID, latestRun.ID)
 	if err != nil {
+		if err == services.ErrAppNotFound {
+			http.Error(w, `{"error": "app not found"}`, http.StatusNotFound)
+			return
+		}
 		http.Error(w, `{"error": "failed to create deployment"}`, http.StatusInternalServerError)
 		return
 	}

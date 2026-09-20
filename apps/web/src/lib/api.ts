@@ -22,7 +22,8 @@ class ApiClient {
     this.client.interceptors.response.use(
       response => response,
       (error: AxiosError) => {
-        if (error.response?.status === 401) {
+        const isLoginRequest = error.config?.url?.includes('/auth/login')
+        if (error.response?.status === 401 && !isLoginRequest) {
           if (typeof window !== 'undefined') {
             // eslint-disable-next-line @next/next/no-location-assign-relative-destination
             window.location.href = '/login'
@@ -61,7 +62,7 @@ class ApiClient {
   }
 
   async getApp(appId: string) {
-    const response = await this.client.get<{ app: App; latest_run: Run }>(`/apps/${appId}`)
+    const response = await this.client.get<{ app: App; latest_run: Run | null }>(`/apps/${appId}`)
     return response.data
   }
 

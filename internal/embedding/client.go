@@ -12,7 +12,7 @@ type Client struct {
 	model    string
 }
 
-func NewClient(apiKey, baseURL, model string) *Client {
+func NewClient(apiKey, baseURL, model string) (*Client, error) {
 	provider, err := ai.NewProviderFromConfig(ai.ProviderConfig{
 		Type:    "openrouter",
 		APIKey:  apiKey,
@@ -20,9 +20,9 @@ func NewClient(apiKey, baseURL, model string) *Client {
 		Model:   model,
 	})
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("create provider: %w", err)
 	}
-	return &Client{provider: provider, model: model}
+	return &Client{provider: provider, model: model}, nil
 }
 
 func NewClientFromProvider(provider ai.Provider, model string) *Client {

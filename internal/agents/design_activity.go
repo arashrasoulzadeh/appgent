@@ -12,10 +12,7 @@ func DesignActivity(ctx context.Context, in temporal.DesignInput) (temporal.Desi
 		return temporal.DesignOutput{}, err
 	}
 
-	model := getModelForAgent("design")
-	if model == "" {
-		model = provider.Name()
-	}
+	model := modelOrDefault(getModelForAgent("design"), provider)
 
 	ragSvc := getRAGService(ctx)
 	agent, err := NewDesignAgent(provider, model, ragSvc)

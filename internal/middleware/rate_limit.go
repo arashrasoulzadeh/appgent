@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -50,6 +51,26 @@ func (rl *RateLimiter) Allow(key string) bool {
 	validRequests = append(validRequests, now)
 	rl.requests[key] = validRequests
 	return true
+}
+
+// Remaining returns how many more requests key may make in the current
+// window without actually consuming one.
+func (rl *RateLimiter) Remaining(key string) int {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	cutoff := time.Now().Add(-rl.window)
+	count := 0
+	for _, t := range rl.requests[key] {
+		if t.After(cutoff) {
+			count++
+		}
+	}
+	remaining := rl.maxRequests - count
+	if remaining < 0 {
+		remaining = 0
+	}
+	return remaining
 }
 
 func (rl *RateLimiter) cleanup() {
@@ -111,9 +132,11 @@ const RateLimitResetKey rateLimitKey = "rate_limit_reset"
 func RateLimitHeadersMiddleware(limiter *RateLimiter, maxRequests int, window time.Duration) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("X-RateLimit-Limit", "")
-			w.Header().Set("X-RateLimit-Remaining", "")
-			w.Header().Set("X-RateLimit-Reset", "")
+			key := UserRateLimitKey(r)
+			remaining := limiter.Remaining(key)
+			w.Header().Set("X-RateLimit-Limit", strconv.Itoa(maxRequests))
+			w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(remaining))
+			w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(window).Unix(), 10))
 			next.ServeHTTP(w, r)
 		})
 	}

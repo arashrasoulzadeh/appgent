@@ -22,7 +22,7 @@ func NewProviderFromConfig(config ProviderConfig) (Provider, error) {
 }
 
 func NewProviderFromEnv() (Provider, error) {
-	providerType := os.Getenv("AI_PROVIDER")
+	providerType := strings.ToLower(os.Getenv("AI_PROVIDER"))
 	if providerType == "" {
 		providerType = "openrouter"
 	}

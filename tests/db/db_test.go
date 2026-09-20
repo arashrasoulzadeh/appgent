@@ -1,15 +1,16 @@
-package db
+package db_test
 
 import (
 	"context"
 	"testing"
 
+	"github.com/arashrasoulzadeh/appgent/internal/db"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestNewPool_InvalidDSN(t *testing.T) {
 	ctx := context.Background()
-	_, err := NewPool(ctx, "invalid-dsn")
+	_, err := db.NewPool(ctx, "invalid-dsn")
 	assert.Error(t, err)
 }
 
@@ -19,7 +20,7 @@ func TestMustNewPool_PanicsOnError(t *testing.T) {
 			assert.Contains(t, r.(error).Error(), "parse config")
 		}
 	}()
-	MustNewPool(context.Background(), "invalid-dsn")
+	db.MustNewPool(context.Background(), "invalid-dsn")
 }
 
 // Integration tests require a real database
@@ -27,7 +28,7 @@ func TestNewPool_Integration(t *testing.T) {
 	dsn := "postgres://appgent:appgent@localhost:5433/appgent?sslmode=disable"
 	ctx := context.Background()
 
-	pool, err := NewPool(ctx, dsn)
+	pool, err := db.NewPool(ctx, dsn)
 	if err != nil {
 		t.Skipf("Database not available: %v", err)
 	}
@@ -45,7 +46,7 @@ func TestNewPool_WithConfig(t *testing.T) {
 	dsn := "postgres://appgent:appgent@localhost:5433/appgent?sslmode=disable"
 	ctx := context.Background()
 
-	pool, err := NewPool(ctx, dsn)
+	pool, err := db.NewPool(ctx, dsn)
 	if err != nil {
 		t.Skipf("Database not available: %v", err)
 	}

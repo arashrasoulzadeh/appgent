@@ -29,7 +29,10 @@ func main() {
 	}
 	defer pool.Close()
 
-	embedClient := embedding.NewClient(apiKey, os.Getenv("OPENROUTER_BASE_URL"), os.Getenv("OPENROUTER_MODEL_EMBEDDING"))
+	embedClient, err := embedding.NewClient(apiKey, os.Getenv("OPENROUTER_BASE_URL"), os.Getenv("OPENROUTER_MODEL_EMBEDDING"))
+	if err != nil {
+		log.Fatalf("create embedding client: %v", err)
+	}
 
 	log.Println("Seeding initial design patterns...")
 	if err := rag.SeedInitialPatterns(ctx, pool, embedClient); err != nil {

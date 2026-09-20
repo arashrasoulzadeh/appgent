@@ -15,20 +15,24 @@ export default function DashboardPage() {
   const [createForm, setCreateForm] = useState({ name: "", kind: "website" as "website" | "pwa", prompt: "" })
   const [createLoading, setCreateLoading] = useState(false)
   const [error, setError] = useState("")
+  const [loadError, setLoadError] = useState("")
 
   useEffect(() => {
     loadApps()
   }, [])
 
   const loadApps = async () => {
+    setLoadError("")
     try {
       const { apps } = await api.getApps()
       setApps(apps)
     } catch (err) {
+      // A 401 here is already handled globally by the axios response
+      // interceptor in lib/api.ts, which redirects to /login. Any other
+      // error (network failure, 5xx, etc.) needs its own user-facing state
+      // so the page doesn't just look permanently empty/loading.
       console.error("Failed to load apps:", err)
-      if (err instanceof Response && err.status === 401) {
-        router.push("/login")
-      }
+      setLoadError("Failed to load your apps. Please try again.")
     } finally {
       setLoading(false)
     }
@@ -52,8 +56,13 @@ export default function DashboardPage() {
   }
 
   const handleLogout = async () => {
-    await api.logout()
-    router.push("/login")
+    try {
+      await api.logout()
+    } catch (err) {
+      console.error("Failed to log out:", err)
+    } finally {
+      router.push("/login")
+    }
   }
 
   if (loading) {
@@ -104,7 +113,19 @@ export default function DashboardPage() {
           </button>
         </div>
 
-        {apps.length === 0 ? (
+        {loadError && (
+          <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 rounded-lg text-sm flex items-center justify-between">
+            <span>{loadError}</span>
+            <button
+              onClick={loadApps}
+              className="font-medium underline hover:no-underline"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
+        {apps.length === 0 && !loadError ? (
           <div className="text-center py-16">
             <LayoutDashboard className="h-16 w-16 mx-auto text-neutral-300 dark:text-neutral-700 mb-4" />
             <h2 className="text-xl font-medium text-neutral-900 dark:text-white mb-2">No apps yet</h2>

@@ -87,5 +87,15 @@ func (a *QAAgent) Execute(ctx context.Context, in temporal.QAInput) (temporal.QA
 		return temporal.QAOutput{}, fmt.Errorf("unmarshal qa output: %w", err)
 	}
 
+	// The model's "passed" field is self-reported and can be inconsistent
+	// with the issues it lists. Never let a run be marked passed if it
+	// reported any blocking issue.
+	for _, issue := range output.Issues {
+		if issue.Severity == "blocking" {
+			output.Passed = false
+			break
+		}
+	}
+
 	return output, nil
 }

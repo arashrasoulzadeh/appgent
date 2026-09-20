@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 
 	"github.com/arashrasoulzadeh/appgent/internal/middleware"
@@ -191,7 +192,10 @@ func (h *AppHandler) RegenerateApp(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Prompt string `json:"prompt"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		http.Error(w, `{"error": "invalid request"}`, http.StatusBadRequest)
+		return
+	}
 
 	run, err := h.appService.Regenerate(r.Context(), userID, appID, req.Prompt)
 	if err != nil {

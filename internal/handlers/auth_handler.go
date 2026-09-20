@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -11,12 +12,20 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-type AuthHandler struct {
-	tokenService *auth.TokenService
-	appService   *services.AppService
+// userLookupService is the subset of AppService's API that AuthHandler
+// needs. It exists so tests can supply a mock rather than a real,
+// DB-backed AppService (a nil *services.AppService would panic on first
+// use because its internal pool is nil).
+type userLookupService interface {
+	GetUserByEmail(ctx context.Context, email string) (*services.User, error)
 }
 
-func NewAuthHandler(tokenService *auth.TokenService, appService *services.AppService) *AuthHandler {
+type AuthHandler struct {
+	tokenService *auth.TokenService
+	appService   userLookupService
+}
+
+func NewAuthHandler(tokenService *auth.TokenService, appService userLookupService) *AuthHandler {
 	return &AuthHandler{
 		tokenService: tokenService,
 		appService:   appService,

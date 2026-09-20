@@ -1,4 +1,4 @@
-package middleware
+package middleware_test
 
 import (
 	"bytes"
@@ -9,12 +9,13 @@ import (
 
 	"github.com/arashrasoulzadeh/appgent/internal/auth"
 	"github.com/arashrasoulzadeh/appgent/internal/logger"
+	"github.com/arashrasoulzadeh/appgent/internal/middleware"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestCORSMiddleware(t *testing.T) {
-	handler := CORSMiddleware("http://localhost:3000")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := middleware.CORSMiddleware("http://localhost:3000")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -39,7 +40,7 @@ func TestCORSMiddleware(t *testing.T) {
 }
 
 func TestJSONMiddleware(t *testing.T) {
-	handler := JSONMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := middleware.JSONMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -55,12 +56,12 @@ func TestAuthMiddleware_ValidToken(t *testing.T) {
 	token, err := ts.GenerateToken("user-123", "test@example.com")
 	require.NoError(t, err)
 
-	handler := AuthMiddleware(ts)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		userID, ok := GetUserID(r)
+	handler := middleware.AuthMiddleware(ts)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		userID, ok := middleware.GetUserID(r)
 		require.True(t, ok)
 		assert.Equal(t, "user-123", userID)
 
-		email, ok := GetEmail(r)
+		email, ok := middleware.GetEmail(r)
 		require.True(t, ok)
 		assert.Equal(t, "test@example.com", email)
 
@@ -78,7 +79,7 @@ func TestAuthMiddleware_ValidToken(t *testing.T) {
 func TestAuthMiddleware_InvalidToken(t *testing.T) {
 	ts := auth.NewTokenService("test-secret", "session", 1, false)
 
-	handler := AuthMiddleware(ts)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := middleware.AuthMiddleware(ts)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -116,7 +117,7 @@ func TestAuthMiddleware_WrongSecret(t *testing.T) {
 
 	token, _ := ts1.GenerateToken("user-123", "test@example.com")
 
-	handler := AuthMiddleware(ts2)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := middleware.AuthMiddleware(ts2)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -131,7 +132,7 @@ func TestAuthMiddleware_WrongSecret(t *testing.T) {
 func TestLoggingMiddleware(t *testing.T) {
 	var buf bytes.Buffer
 	log := logger.New("debug", "text", &buf)
-	handler := LoggingMiddleware(log)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := middleware.LoggingMiddleware(log)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -147,16 +148,16 @@ func TestLoggingMiddleware(t *testing.T) {
 func TestGetUserID(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	ctx := req.Context()
-	ctx = context.WithValue(ctx, UserIDKey, "user-123")
+	ctx = context.WithValue(ctx, middleware.UserIDKey, "user-123")
 	req = req.WithContext(ctx)
 
-	userID, ok := GetUserID(req)
+	userID, ok := middleware.GetUserID(req)
 	assert.True(t, ok)
 	assert.Equal(t, "user-123", userID)
 
 	// Without value
 	req2 := httptest.NewRequest(http.MethodGet, "/", nil)
-	userID2, ok2 := GetUserID(req2)
+	userID2, ok2 := middleware.GetUserID(req2)
 	assert.False(t, ok2)
 	assert.Empty(t, userID2)
 }
@@ -164,16 +165,16 @@ func TestGetUserID(t *testing.T) {
 func TestGetEmail(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	ctx := req.Context()
-	ctx = context.WithValue(ctx, EmailKey, "test@example.com")
+	ctx = context.WithValue(ctx, middleware.EmailKey, "test@example.com")
 	req = req.WithContext(ctx)
 
-	email, ok := GetEmail(req)
+	email, ok := middleware.GetEmail(req)
 	assert.True(t, ok)
 	assert.Equal(t, "test@example.com", email)
 
 	// Without value
 	req2 := httptest.NewRequest(http.MethodGet, "/", nil)
-	email2, ok2 := GetEmail(req2)
+	email2, ok2 := middleware.GetEmail(req2)
 	assert.False(t, ok2)
 	assert.Empty(t, email2)
 }

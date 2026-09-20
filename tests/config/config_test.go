@@ -1,11 +1,17 @@
-package config
+package config_test
 
 import (
 	"os"
 	"testing"
 
+	"github.com/arashrasoulzadeh/appgent/internal/config"
 	"github.com/stretchr/testify/assert"
 )
+
+// Note: getEnv and getEnvInt are unexported helpers in internal/config and
+// cannot be unit-tested directly from this external test package. Their
+// behavior is still exercised indirectly through TestLoad_Defaults,
+// TestLoad_FromEnv, and TestLoad_SessionTTLHours_InvalidDefaults below.
 
 func TestLoad_Defaults(t *testing.T) {
 	// Clear env vars that might affect defaults
@@ -23,7 +29,7 @@ func TestLoad_Defaults(t *testing.T) {
 	os.Unsetenv("CORS_ALLOWED_ORIGIN")
 	os.Unsetenv("LOG_LEVEL")
 
-	cfg := Load()
+	cfg := config.Load()
 
 	assert.Equal(t, "8080", cfg.Port)
 	assert.Equal(t, "", cfg.PostgresDSN)
@@ -70,7 +76,7 @@ func TestLoad_FromEnv(t *testing.T) {
 		os.Unsetenv("LOG_LEVEL")
 	}()
 
-	cfg := Load()
+	cfg := config.Load()
 
 	assert.Equal(t, "9090", cfg.Port)
 	assert.Equal(t, "postgres://test:test@localhost:5432/test", cfg.PostgresDSN)
@@ -91,27 +97,7 @@ func TestLoad_SessionTTLHours_InvalidDefaults(t *testing.T) {
 	os.Setenv("SESSION_TTL_HOURS", "invalid")
 	defer os.Unsetenv("SESSION_TTL_HOURS")
 
-	cfg := Load()
+	cfg := config.Load()
 
 	assert.Equal(t, 168, cfg.SessionTTLHours) // Should default to 168
-}
-
-func TestGetEnv(t *testing.T) {
-	os.Setenv("TEST_KEY", "test-value")
-	defer os.Unsetenv("TEST_KEY")
-
-	assert.Equal(t, "test-value", getEnv("TEST_KEY", "default"))
-	assert.Equal(t, "default", getEnv("NONEXISTENT_KEY", "default"))
-}
-
-func TestGetEnvInt(t *testing.T) {
-	os.Setenv("TEST_INT", "42")
-	defer os.Unsetenv("TEST_INT")
-
-	assert.Equal(t, 42, getEnvInt("TEST_INT", 0))
-	assert.Equal(t, 0, getEnvInt("NONEXISTENT_INT", 0))
-
-	os.Setenv("TEST_INVALID", "not-a-number")
-	defer os.Unsetenv("TEST_INVALID")
-	assert.Equal(t, 0, getEnvInt("TEST_INVALID", 0))
 }

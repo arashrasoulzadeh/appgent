@@ -7,9 +7,11 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/arashrasoulzadeh/appgent/internal/agents"
 	"github.com/arashrasoulzadeh/appgent/internal/config"
 	"github.com/arashrasoulzadeh/appgent/internal/temporal"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 )
@@ -41,13 +43,18 @@ func main() {
 		MaxConcurrentActivityExecutionSize: 10,
 	})
 
-	// Register workflow and activities
+	// Register workflow and activities. Activities are registered under
+	// explicit names matching what GenerateAppWorkflow references by
+	// string (internal/temporal/workflow.go) — the real implementations
+	// live in internal/agents, not in the temporal package itself.
+	persistActivities := &agents.PersistActivities{Pool: pool}
+
 	w.RegisterWorkflow(temporal.GenerateAppWorkflow)
-	w.RegisterActivity(temporal.PlanActivity)
-	w.RegisterActivity(temporal.DesignActivity)
-	w.RegisterActivity(temporal.CodeActivity)
-	w.RegisterActivity(temporal.QAActivity)
-	w.RegisterActivity(temporal.PersistRunResultActivity)
+	w.RegisterActivityWithOptions(agents.PlanActivity, activity.RegisterOptions{Name: "PlanActivity"})
+	w.RegisterActivityWithOptions(agents.DesignActivity, activity.RegisterOptions{Name: "DesignActivity"})
+	w.RegisterActivityWithOptions(agents.CodeActivity, activity.RegisterOptions{Name: "CodeActivity"})
+	w.RegisterActivityWithOptions(agents.QAActivity, activity.RegisterOptions{Name: "QAActivity"})
+	w.RegisterActivityWithOptions(persistActivities.PersistRunResult, activity.RegisterOptions{Name: "PersistRunResultActivity"})
 
 	// Start worker
 	err = w.Start()

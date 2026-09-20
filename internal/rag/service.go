@@ -3,6 +3,8 @@ package rag
 import (
 	"context"
 	"fmt"
+	"path"
+	"strings"
 
 	"github.com/arashrasoulzadeh/appgent/internal/embedding"
 	"github.com/arashrasoulzadeh/appgent/internal/temporal"
@@ -37,7 +39,7 @@ func (s *Service) QuerySimilar(ctx context.Context, queryText string, limit int)
 	rows, err := s.db.Query(ctx, `
 		SELECT kind, title, content
 		FROM design_patterns
-		ORDER BY embedding <=> $1
+		ORDER BY embedding <=> $1::vector
 		LIMIT $2
 	`, embeddingStr, limit)
 	if err != nil {
@@ -71,7 +73,7 @@ func (s *Service) AddPattern(ctx context.Context, kind, title, content string) e
 
 	_, err = s.db.Exec(ctx, `
 		INSERT INTO design_patterns (kind, title, content, embedding)
-		VALUES ($1, $2, $3, $4)
+		VALUES ($1, $2, $3, $4::vector)
 	`, kind, title, content, embeddingStr)
 	return err
 }
@@ -80,7 +82,7 @@ func (s *Service) ExtractPatternsFromRun(ctx context.Context, runID string, file
 	// Extract component patterns from generated code
 	for path, content := range files {
 		// Simple heuristic: extract component files
-		if isComponentFile(path) {
+		if IsComponentFile(path) {
 			kind := "component"
 			title := path
 			if err := s.AddPattern(ctx, kind, title, content); err != nil {
@@ -92,10 +94,13 @@ func (s *Service) ExtractPatternsFromRun(ctx context.Context, runID string, file
 	return nil
 }
 
-func isComponentFile(path string) bool {
-	// Check if it's a React component file
-	return len(path) > 0 && (path[0] >= 'A' && path[0] <= 'Z') && 
-		(len(path) > 4 && path[len(path)-4:] == ".tsx")
+// IsComponentFile reports whether filePath looks like a React component
+// file: its base filename (not the leading directory character) must be
+// PascalCase and end in .tsx.
+func IsComponentFile(filePath string) bool {
+	base := path.Base(filePath)
+	return len(base) > 0 && (base[0] >= 'A' && base[0] <= 'Z') &&
+		strings.HasSuffix(base, ".tsx")
 }
 
 func vectorToString(vec []float32) string {

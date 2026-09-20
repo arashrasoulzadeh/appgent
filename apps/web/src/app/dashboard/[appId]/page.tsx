@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { api, App, Run, AgentStep, Deployment } from "@/lib/api"
 import { formatDate, formatDateTime, truncate, cn } from "@/lib/utils"
@@ -53,45 +53,64 @@ export default function AppDetailPage() {
   const [regeneratePrompt, setRegeneratePrompt] = useState("")
   const [activeTab, setActiveTab] = useState("preview")
 
+  // Tracks the appId that each in-flight fetch was started for, so that
+  // responses for a stale appId (e.g. the user navigated to a different
+  // app while a request was still in flight) never overwrite state for
+  // the currently displayed app.
+  const currentAppIdRef = useRef(appId)
+
   useEffect(() => {
+    currentAppIdRef.current = appId
     loadApp()
     loadRuns()
     loadDeployments()
   }, [appId])
 
   const loadApp = async () => {
+    const requestedAppId = appId
     try {
-      const { app: appData, latest_run } = await api.getApp(appId)
+      const { app: appData, latest_run } = await api.getApp(requestedAppId)
+      if (currentAppIdRef.current !== requestedAppId) return
       setApp(appData)
       if (latest_run) {
         setSelectedRun(latest_run)
-        loadRunDetails(latest_run.id)
+        loadRunDetails(latest_run.id, requestedAppId)
+      } else {
+        setSelectedRun(null)
+        setSteps([])
       }
     } catch (err) {
       console.error("Failed to load app:", err)
-      router.push("/dashboard")
+      if (currentAppIdRef.current === requestedAppId) {
+        router.push("/dashboard")
+      }
     } finally {
-      setLoading(false)
+      if (currentAppIdRef.current === requestedAppId) {
+        setLoading(false)
+      }
     }
   }
 
   const loadRuns = async () => {
+    const requestedAppId = appId
     try {
-      const { runs: runsData } = await api.getRuns(appId)
+      const { runs: runsData } = await api.getRuns(requestedAppId)
+      if (currentAppIdRef.current !== requestedAppId) return
       setRuns(runsData)
     } catch (err) {
       console.error("Failed to load runs:", err)
     }
   }
 
-  const loadRunDetails = async (runId: string) => {
+  const loadRunDetails = async (runId: string, forAppId: string = appId) => {
     try {
-      const { run, steps: stepsData } = await api.getRun(appId, runId)
+      const { run, steps: stepsData } = await api.getRun(forAppId, runId)
+      if (currentAppIdRef.current !== forAppId) return
       setSelectedRun(run)
       setSteps(stepsData)
-      
+
       if (run.status === "succeeded" || run.status === "needs_review") {
-        loadPreview(runId)
+        loadPreview(runId, forAppId)
       }
     } catch (err) {
       console.error("Failed to load run details:", err)
@@ -99,17 +118,20 @@ export default function AppDetailPage() {
   }
 
   const loadDeployments = async () => {
+    const requestedAppId = appId
     try {
-      const { deployments: deps } = await api.getDeployments(appId)
+      const { deployments: deps } = await api.getDeployments(requestedAppId)
+      if (currentAppIdRef.current !== requestedAppId) return
       setDeployments(deps)
     } catch (err) {
       console.error("Failed to load deployments:", err)
     }
   }
 
-  const loadPreview = async (runId: string) => {
+  const loadPreview = async (runId: string, forAppId: string = appId) => {
     try {
-      const { preview_url, expires_at } = await api.getPreviewUrl(appId, runId)
+      const { preview_url, expires_at } = await api.getPreviewUrl(forAppId, runId)
+      if (currentAppIdRef.current !== forAppId) return
       setPreviewUrl(preview_url)
       setPreviewExpiry(expires_at)
     } catch (err) {
@@ -266,8 +288,8 @@ export default function AppDetailPage() {
                     <h3 className="text-sm font-medium text-neutral-900 dark:text-white mb-3">Agent Steps</h3>
                     <Accordion type="single" className="w-full">
                       {steps.map((step, idx) => {
-                        const agentInfo = AGENT_LABELS[step.agent_type]
-                        const isActive = selectedRun.status === "running" && 
+                        const agentInfo = AGENT_LABELS[step.agent_type] ?? { label: step.agent_type, icon: FileCode }
+                        const isActive = selectedRun.status === "running" &&
                           steps.slice(0, idx).every(s => s.status === "succeeded") &&
                           (step.status === "running" || step.status === "pending")
                         return (

@@ -12,10 +12,7 @@ func CodeActivity(ctx context.Context, in temporal.CodeInput) (temporal.CodeOutp
 		return temporal.CodeOutput{}, err
 	}
 
-	model := getModelForAgent("code")
-	if model == "" {
-		model = provider.Name()
-	}
+	model := modelOrDefault(getModelForAgent("code"), provider)
 
 	ragSvc := getRAGService(ctx)
 	agent, err := NewCodeAgent(provider, model, ragSvc)

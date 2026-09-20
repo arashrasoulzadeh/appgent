@@ -12,10 +12,7 @@ func QAActivity(ctx context.Context, in temporal.QAInput) (temporal.QAOutput, er
 		return temporal.QAOutput{}, err
 	}
 
-	model := getModelForAgent("qa")
-	if model == "" {
-		model = provider.Name()
-	}
+	model := modelOrDefault(getModelForAgent("qa"), provider)
 
 	agent, err := NewQAAgent(provider, model)
 	if err != nil {

@@ -12,10 +12,7 @@ func PlanActivity(ctx context.Context, in temporal.PlanInput) (temporal.PlanOutp
 		return temporal.PlanOutput{}, err
 	}
 
-	model := getModelForAgent("plan")
-	if model == "" {
-		model = provider.Name()
-	}
+	model := modelOrDefault(getModelForAgent("plan"), provider)
 
 	ragSvc := getRAGService(ctx)
 	agent, err := NewPlanAgent(provider, model, ragSvc)

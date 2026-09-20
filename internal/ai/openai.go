@@ -89,10 +89,13 @@ func (p *OpenAIProvider) ChatCompletionWithJSONSchema(ctx context.Context, model
 		Model:       model,
 		Messages:    messages,
 		Temperature: temperature,
-		JSONSchema: &JSONSchema{
-			Name:   "response",
-			Schema: schema,
-			Strict: true,
+		ResponseFormat: &ResponseFormat{
+			Type: "json_schema",
+			JSONSchema: &JSONSchema{
+				Name:   "response",
+				Schema: schema,
+				Strict: true,
+			},
 		},
 	}
 	return p.ChatCompletion(ctx, req)

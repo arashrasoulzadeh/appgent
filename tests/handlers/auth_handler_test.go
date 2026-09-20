@@ -1,4 +1,4 @@
-package handlers
+package handlers_test
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/arashrasoulzadeh/appgent/internal/auth"
+	"github.com/arashrasoulzadeh/appgent/internal/handlers"
 	"github.com/arashrasoulzadeh/appgent/internal/middleware"
 	"github.com/arashrasoulzadeh/appgent/internal/services"
 	"github.com/google/uuid"
@@ -18,7 +19,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// MockAppService is a mock implementation of AppService for testing
+// MockAppService is a mock implementation of AppService for testing. It
+// satisfies whatever unexported service interfaces the handlers package
+// requires (e.g. the user-lookup interface used by AuthHandler) purely by
+// having the matching exported methods - the interfaces themselves don't
+// need to be named here.
 type MockAppService struct {
 	mock.Mock
 }
@@ -70,8 +75,8 @@ func (m *MockAppService) GetRunWithSteps(ctx context.Context, userID, appID, run
 	return args.Get(0).(*services.Run), args.Get(1).([]*services.AgentStep), args.Error(2)
 }
 
-func (m *MockAppService) CreateDeployment(ctx context.Context, appID, runID uuid.UUID) (*services.Deployment, error) {
-	args := m.Called(ctx, appID, runID)
+func (m *MockAppService) CreateDeployment(ctx context.Context, userID, appID, runID uuid.UUID) (*services.Deployment, error) {
+	args := m.Called(ctx, userID, appID, runID)
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
@@ -88,12 +93,28 @@ func (m *MockAppService) GetPreviewURL(ctx context.Context, userID, appID, runID
 	return args.String(0), args.Get(1).(time.Time), args.Error(2)
 }
 
+func (m *MockAppService) GetUserByEmail(ctx context.Context, email string) (*services.User, error) {
+	args := m.Called(ctx, email)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*services.User), args.Error(1)
+}
+
 func TestAuthHandler_Login(t *testing.T) {
 	ts := auth.NewTokenService("test-secret", "session", 1, false)
-	handler := NewAuthHandler(ts, nil)
+
+	// bcrypt hash of "admin", generated once at package build time via
+	// bcrypt.GenerateFromPassword([]byte("admin"), bcrypt.DefaultCost).
+	const adminHash = "$2a$10$ahq6GKS4oPrK/R7mIc6zaes1tjjy1h5hwGI6N5Am6fd9KEPjsnjeK"
 
 	t.Run("valid credentials", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", 
+		mockSvc := new(MockAppService)
+		mockSvc.On("GetUserByEmail", mock.Anything, "admin").
+			Return(&services.User{ID: uuid.New(), Email: "admin", PasswordHash: adminHash}, nil)
+		handler := handlers.NewAuthHandler(ts, mockSvc)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login",
 			strings.NewReader(`{"email":"admin","password":"admin"}`))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
@@ -101,14 +122,27 @@ func TestAuthHandler_Login(t *testing.T) {
 		handler.Login(w, req)
 
 		assert.Equal(t, http.StatusOK, w.Code)
-		
+
 		var resp map[string]interface{}
 		err := json.NewDecoder(w.Body).Decode(&resp)
 		require.NoError(t, err)
 		assert.Contains(t, resp, "user")
+
+		// A session cookie must be set on successful login.
+		cookies := w.Result().Cookies()
+		require.Len(t, cookies, 1)
+		assert.Equal(t, "session", cookies[0].Name)
+		assert.NotEmpty(t, cookies[0].Value)
+
+		mockSvc.AssertExpectations(t)
 	})
 
-	t.Run("invalid credentials", func(t *testing.T) {
+	t.Run("wrong password", func(t *testing.T) {
+		mockSvc := new(MockAppService)
+		mockSvc.On("GetUserByEmail", mock.Anything, "admin").
+			Return(&services.User{ID: uuid.New(), Email: "admin", PasswordHash: adminHash}, nil)
+		handler := handlers.NewAuthHandler(ts, mockSvc)
+
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login",
 			strings.NewReader(`{"email":"admin","password":"wrong"}`))
 		req.Header.Set("Content-Type", "application/json")
@@ -119,7 +153,24 @@ func TestAuthHandler_Login(t *testing.T) {
 		assert.Equal(t, http.StatusUnauthorized, w.Code)
 	})
 
+	t.Run("unknown user", func(t *testing.T) {
+		mockSvc := new(MockAppService)
+		mockSvc.On("GetUserByEmail", mock.Anything, "nobody@example.com").
+			Return(nil, services.ErrUserNotFound)
+		handler := handlers.NewAuthHandler(ts, mockSvc)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login",
+			strings.NewReader(`{"email":"nobody@example.com","password":"whatever"}`))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		handler.Login(w, req)
+
+		assert.Equal(t, http.StatusUnauthorized, w.Code)
+	})
+
 	t.Run("invalid JSON", func(t *testing.T) {
+		handler := handlers.NewAuthHandler(ts, new(MockAppService))
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login",
 			strings.NewReader(`invalid json`))
 		req.Header.Set("Content-Type", "application/json")
@@ -133,7 +184,7 @@ func TestAuthHandler_Login(t *testing.T) {
 
 func TestAuthHandler_Logout(t *testing.T) {
 	ts := auth.NewTokenService("test-secret", "session", 1, false)
-	handler := NewAuthHandler(ts, nil)
+	handler := handlers.NewAuthHandler(ts, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
 	w := httptest.NewRecorder()
@@ -150,7 +201,7 @@ func TestAuthHandler_Logout(t *testing.T) {
 
 func TestAuthHandler_Me(t *testing.T) {
 	ts := auth.NewTokenService("test-secret", "session", 1, false)
-	handler := NewAuthHandler(ts, nil)
+	handler := handlers.NewAuthHandler(ts, nil)
 
 	t.Run("with valid session", func(t *testing.T) {
 		// Manually set context values as AuthMiddleware would
@@ -164,7 +215,7 @@ func TestAuthHandler_Me(t *testing.T) {
 		handler.Me(w, req)
 
 		assert.Equal(t, http.StatusOK, w.Code)
-		
+
 		var resp map[string]interface{}
 		err := json.NewDecoder(w.Body).Decode(&resp)
 		require.NoError(t, err)

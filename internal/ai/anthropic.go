@@ -66,6 +66,11 @@ type anthropicResponse struct {
 	} `json:"usage"`
 }
 
+// defaultAnthropicMaxTokens is used when a caller doesn't set MaxTokens.
+// Anthropic's API requires max_tokens to be a positive integer (unlike the
+// OpenAI-style APIs where 0/omitted falls back to a server-side default).
+const defaultAnthropicMaxTokens = 8192
+
 func (p *AnthropicProvider) ChatCompletion(ctx context.Context, req ChatCompletionRequest) (*ChatCompletionResponse, error) {
 	systemPrompt := ""
 	messages := req.Messages
@@ -74,9 +79,14 @@ func (p *AnthropicProvider) ChatCompletion(ctx context.Context, req ChatCompleti
 		messages = messages[1:]
 	}
 
+	maxTokens := req.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = defaultAnthropicMaxTokens
+	}
+
 	anthropicReq := anthropicRequest{
 		Model:       req.Model,
-		MaxTokens:   req.MaxTokens,
+		MaxTokens:   maxTokens,
 		Temperature: req.Temperature,
 		Messages:    messages,
 		System:      systemPrompt,
