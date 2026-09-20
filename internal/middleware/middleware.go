@@ -2,18 +2,18 @@ package middleware
 
 import (
 	"context"
-	"log"
 	"net/http"
 	"time"
 
 	"github.com/arashrasoulzadeh/appgent/internal/auth"
+	"github.com/arashrasoulzadeh/appgent/internal/logger"
 )
 
 type contextKey string
 
 const (
-	UserIDKey contextKey = "user_id"
-	EmailKey  contextKey = "email"
+	UserIDKey  contextKey = "user_id"
+	EmailKey   contextKey = "email"
 )
 
 func AuthMiddleware(tokenService *auth.TokenService) func(http.Handler) http.Handler {
@@ -75,14 +75,35 @@ func JSONMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func LoggingMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		wrapped := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
-		next.ServeHTTP(wrapped, r)
-		duration := time.Since(start)
-		log.Printf("%s %s %d %s", r.Method, r.URL.Path, wrapped.statusCode, duration)
-	})
+func LoggingMiddleware(log *logger.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			wrapped := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+
+			requestID := ""
+			if id := r.Context().Value(RequestIDKeyVal); id != nil {
+				requestID = id.(string)
+			}
+
+			log.Info("HTTP request started",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"request_id", requestID,
+			)
+
+			next.ServeHTTP(wrapped, r)
+
+			duration := time.Since(start)
+			log.Info("HTTP request completed",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"status", wrapped.statusCode,
+				"duration_ms", duration.Milliseconds(),
+				"request_id", requestID,
+			)
+		})
+	}
 }
 
 type responseWriter struct {

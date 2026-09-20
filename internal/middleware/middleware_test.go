@@ -1,12 +1,14 @@
 package middleware
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/arashrasoulzadeh/appgent/internal/auth"
+	"github.com/arashrasoulzadeh/appgent/internal/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -127,8 +129,9 @@ func TestAuthMiddleware_WrongSecret(t *testing.T) {
 }
 
 func TestLoggingMiddleware(t *testing.T) {
-	// We can't easily test the internal log.Printf, so just verify it doesn't panic
-	handler := LoggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var buf bytes.Buffer
+	log := logger.New("debug", "text", &buf)
+	handler := LoggingMiddleware(log)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -137,6 +140,8 @@ func TestLoggingMiddleware(t *testing.T) {
 	handler.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, buf.String(), "HTTP request started")
+	assert.Contains(t, buf.String(), "HTTP request completed")
 }
 
 func TestGetUserID(t *testing.T) {

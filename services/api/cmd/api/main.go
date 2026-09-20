@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -12,6 +11,7 @@ import (
 	"github.com/arashrasoulzadeh/appgent/internal/config"
 	"github.com/arashrasoulzadeh/appgent/internal/db"
 	"github.com/arashrasoulzadeh/appgent/internal/handlers"
+	"github.com/arashrasoulzadeh/appgent/internal/logger"
 	"github.com/arashrasoulzadeh/appgent/internal/middleware"
 	"github.com/arashrasoulzadeh/appgent/internal/services"
 	"github.com/arashrasoulzadeh/appgent/internal/auth"
@@ -23,12 +23,17 @@ func main() {
 
 	ctx := context.Background()
 
+	// Initialize structured logger
+	log := logger.New(cfg.LogLevel, "json", os.Stdout)
+	log.Info("Starting API server", "port", cfg.Port)
+
 	pool := db.MustNewPool(ctx, cfg.PostgresDSN)
 	defer pool.Close()
 
 	// Run migrations
 	if err := runMigrations(ctx, pool); err != nil {
-		log.Fatalf("migrations: %v", err)
+		log.Error("Failed to run migrations", "error", err)
+		os.Exit(1)
 	}
 
 	// Initialize services
@@ -48,6 +53,9 @@ func main() {
 	previewHandler := handlers.NewPreviewHandler(appService)
 	sseHandler := handlers.NewSSEHandler(appService)
 	healthHandler := handlers.NewHealthHandler(pool)
+
+	// Initialize rate limiter
+	rateLimiter := middleware.NewRateLimiter(100, time.Minute) // 100 requests per minute per user
 
 	// Setup routes
 	mux := http.NewServeMux()
@@ -79,15 +87,19 @@ func main() {
 	// Apply middleware chain
 	handler := middleware.CORSMiddleware(cfg.CORSAllowedOrigin)(
 		middleware.JSONMiddleware(
-			middleware.LoggingMiddleware(
-				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					// Route to protected or public
-					if r.URL.Path == "/api/v1/auth/login" || r.URL.Path == "/healthz" {
-						mux.ServeHTTP(w, r)
-					} else {
-						middleware.AuthMiddleware(tokenService)(protected).ServeHTTP(w, r)
-					}
-				}),
+			middleware.NewRequestIDMiddleware().Middleware(
+				middleware.LoggingMiddleware(log)(
+					middleware.RateLimitMiddleware(rateLimiter, middleware.UserRateLimitKey)(
+						http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+							// Route to protected or public
+							if r.URL.Path == "/api/v1/auth/login" || r.URL.Path == "/healthz" {
+								mux.ServeHTTP(w, r)
+							} else {
+								middleware.AuthMiddleware(tokenService)(protected).ServeHTTP(w, r)
+							}
+						}),
+					),
+				),
 			),
 		),
 	)
@@ -101,9 +113,10 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("Starting API server on port %s", cfg.Port)
+		log.Info("Starting API server", "port", cfg.Port)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server: %v", err)
+			log.Error("Server error", "error", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -111,18 +124,17 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("Shutting down server...")
+	log.Info("Shutting down server...")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := server.Shutdown(ctx); err != nil {
-		log.Fatalf("server shutdown: %v", err)
+		log.Error("Server shutdown error", "error", err)
 	}
-	log.Println("Server stopped")
+	log.Info("Server stopped")
 }
 
 func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
-	// Check if migrations table exists, if not create it
 	_, err := pool.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
 			version TEXT PRIMARY KEY,
@@ -176,7 +188,7 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 			return err
 		}
 
-		log.Printf("Applied migration: %s", m.version)
+		logger.DefaultLogger.Info("Applied migration", "version", m.version)
 	}
 
 	return nil
