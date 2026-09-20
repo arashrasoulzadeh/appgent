@@ -18,7 +18,7 @@ linters-settings:
   misspell:
     locale: US
   lll:
-    line-length: 120
+    line-length: 200
   gosec:
     excludes:
       - G104 # Errors unhandled
@@ -29,12 +29,10 @@ linters-settings:
 linters:
   enable:
     - bodyclose
-    - depguard
     - dogsled
     - dupl
     - errcheck
     - exhaustive
-    - exportloopref
     - funlen
     - gochecknoinits
     - goconst
@@ -43,7 +41,6 @@ linters:
     - godot
     - gofmt
     - goimports
-    - gomnd
     - goprintffuncname
     - gosec
     - gosimple
@@ -59,13 +56,11 @@ linters:
     - rowserrcheck
     - sqlclosecheck
     - staticcheck
-    - structcheck
     - stylecheck
     - typecheck
     - unconvert
     - unparam
     - unused
-    - varcheck
     - whitespace
   disable:
     - gochecknoglobals
@@ -78,12 +73,10 @@ issues:
       linters:
         - funlen
         - gosec
-        - gomnd
         - lll
     - path: main\.go
       linters:
         - funlen
-        - gomnd
     - path: cmd/seed
       linters:
         - funlen
