@@ -2,22 +2,23 @@ package agents
 
 import (
 	"context"
-	"os"
 
-	"github.com/arashrasoulzadeh/appgent/internal/openrouter"
 	"github.com/arashrasoulzadeh/appgent/internal/temporal"
 )
 
 func CodeActivity(ctx context.Context, in temporal.CodeInput) (temporal.CodeOutput, error) {
-	apiKey := os.Getenv("OPENROUTER_API_KEY")
-	model := os.Getenv("OPENROUTER_MODEL_CODE")
-	if model == "" {
-		model = "nvidia/nemotron-3-ultra:free"
+	provider, err := getAIProvider()
+	if err != nil {
+		return temporal.CodeOutput{}, err
 	}
 
-	client := openrouter.NewClient(apiKey, os.Getenv("OPENROUTER_BASE_URL"))
+	model := getModelForAgent("code")
+	if model == "" {
+		model = provider.Name()
+	}
+
 	ragSvc := getRAGService(ctx)
-	agent, err := NewCodeAgent(client, model, ragSvc)
+	agent, err := NewCodeAgent(provider, model, ragSvc)
 	if err != nil {
 		return temporal.CodeOutput{}, err
 	}

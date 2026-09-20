@@ -8,19 +8,19 @@ import (
 	"os"
 	"text/template"
 
-	"github.com/arashrasoulzadeh/appgent/internal/openrouter"
+	"github.com/arashrasoulzadeh/appgent/internal/ai"
 	"github.com/arashrasoulzadeh/appgent/internal/rag"
 	"github.com/arashrasoulzadeh/appgent/internal/temporal"
 )
 
 type PlanAgent struct {
-	client   *openrouter.Client
+	provider ai.Provider
 	model    string
 	prompt   *template.Template
 	ragSvc   *rag.Service
 }
 
-func NewPlanAgent(client *openrouter.Client, model string, ragSvc *rag.Service) (*PlanAgent, error) {
+func NewPlanAgent(provider ai.Provider, model string, ragSvc *rag.Service) (*PlanAgent, error) {
 	promptPath := "internal/agents/prompts/plan.tmpl"
 	if _, err := os.Stat(promptPath); os.IsNotExist(err) {
 		promptPath = "../../../internal/agents/prompts/plan.tmpl"
@@ -29,11 +29,10 @@ func NewPlanAgent(client *openrouter.Client, model string, ragSvc *rag.Service) 
 	if err != nil {
 		return nil, fmt.Errorf("parse plan template: %w", err)
 	}
-	return &PlanAgent{client: client, model: model, prompt: tmpl, ragSvc: ragSvc}, nil
+	return &PlanAgent{provider: provider, model: model, prompt: tmpl, ragSvc: ragSvc}, nil
 }
 
 func (a *PlanAgent) Execute(ctx context.Context, in temporal.PlanInput) (temporal.PlanOutput, error) {
-	// Query RAG for similar patterns if service is available
 	var ragContext []temporal.DesignPattern
 	if a.ragSvc != nil {
 		queryText := fmt.Sprintf("App kind: %s. User prompt: %s", in.AppKind, in.UserPrompt)
@@ -55,7 +54,7 @@ func (a *PlanAgent) Execute(ctx context.Context, in temporal.PlanInput) (tempora
 		return temporal.PlanOutput{}, fmt.Errorf("execute template: %w", err)
 	}
 
-	messages := []openrouter.Message{
+	messages := []ai.Message{
 		{Role: "system", Content: "You are an expert product planner and software architect. Output ONLY valid JSON."},
 		{Role: "user", Content: buf.String()},
 	}
@@ -119,9 +118,9 @@ func (a *PlanAgent) Execute(ctx context.Context, in temporal.PlanInput) (tempora
 		"additionalProperties": false,
 	}
 
-	resp, err := a.client.ChatCompletionWithJSONSchema(ctx, a.model, messages, schema, 0.3)
+	resp, err := a.provider.ChatCompletionWithJSONSchema(ctx, a.model, messages, schema, 0.3)
 	if err != nil {
-		return temporal.PlanOutput{}, fmt.Errorf("openrouter call: %w", err)
+		return temporal.PlanOutput{}, fmt.Errorf("AI provider call: %w", err)
 	}
 
 	var output temporal.PlanOutput

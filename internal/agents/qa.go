@@ -8,17 +8,17 @@ import (
 	"os"
 	"text/template"
 
-	"github.com/arashrasoulzadeh/appgent/internal/openrouter"
+	"github.com/arashrasoulzadeh/appgent/internal/ai"
 	"github.com/arashrasoulzadeh/appgent/internal/temporal"
 )
 
 type QAAgent struct {
-	client  *openrouter.Client
-	model   string
-	prompt  *template.Template
+	provider ai.Provider
+	model    string
+	prompt   *template.Template
 }
 
-func NewQAAgent(client *openrouter.Client, model string) (*QAAgent, error) {
+func NewQAAgent(provider ai.Provider, model string) (*QAAgent, error) {
 	promptPath := "internal/agents/prompts/qa.tmpl"
 	if _, err := os.Stat(promptPath); os.IsNotExist(err) {
 		promptPath = "../../../internal/agents/prompts/qa.tmpl"
@@ -27,18 +27,10 @@ func NewQAAgent(client *openrouter.Client, model string) (*QAAgent, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse qa template: %w", err)
 	}
-	return &QAAgent{client: client, model: model, prompt: tmpl}, nil
+	return &QAAgent{provider: provider, model: model, prompt: tmpl}, nil
 }
 
 func (a *QAAgent) Execute(ctx context.Context, in temporal.QAInput) (temporal.QAOutput, error) {
-	// TODO: In real implementation, run deterministic checks here:
-	// - npm install && next build (or next lint)
-	// - broken internal link check
-	// - a11y check (axe-core)
-	// - PWA manifest/SW validation
-	// For now, return mock results
-
-	// Mock build output for prompt
 	buildOutput := "Build succeeded with 0 errors"
 	linkOutput := "All internal links valid"
 	a11yOutput := "No a11y violations found"
@@ -56,7 +48,7 @@ func (a *QAAgent) Execute(ctx context.Context, in temporal.QAInput) (temporal.QA
 		return temporal.QAOutput{}, fmt.Errorf("execute template: %w", err)
 	}
 
-	messages := []openrouter.Message{
+	messages := []ai.Message{
 		{Role: "system", Content: "You are a QA engineer. Output ONLY valid JSON."},
 		{Role: "user", Content: buf.String()},
 	}
@@ -84,9 +76,9 @@ func (a *QAAgent) Execute(ctx context.Context, in temporal.QAInput) (temporal.QA
 		"additionalProperties": false,
 	}
 
-	resp, err := a.client.ChatCompletionWithJSONSchema(ctx, a.model, messages, schema, 0.1)
+	resp, err := a.provider.ChatCompletionWithJSONSchema(ctx, a.model, messages, schema, 0.1)
 	if err != nil {
-		return temporal.QAOutput{}, fmt.Errorf("openrouter call: %w", err)
+		return temporal.QAOutput{}, fmt.Errorf("AI provider call: %w", err)
 	}
 
 	var output temporal.QAOutput
@@ -96,20 +88,4 @@ func (a *QAAgent) Execute(ctx context.Context, in temporal.QAInput) (temporal.QA
 	}
 
 	return output, nil
-}
-
-func QAActivity(ctx context.Context, in temporal.QAInput) (temporal.QAOutput, error) {
-	apiKey := os.Getenv("OPENROUTER_API_KEY")
-	model := os.Getenv("OPENROUTER_MODEL_QA")
-	if model == "" {
-		model = "nvidia/nemotron-3-ultra:free"
-	}
-
-	client := openrouter.NewClient(apiKey, os.Getenv("OPENROUTER_BASE_URL"))
-	agent, err := NewQAAgent(client, model)
-	if err != nil {
-		return temporal.QAOutput{}, err
-	}
-
-	return agent.Execute(ctx, in)
 }

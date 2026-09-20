@@ -8,19 +8,19 @@ import (
 	"os"
 	"text/template"
 
-	"github.com/arashrasoulzadeh/appgent/internal/openrouter"
+	"github.com/arashrasoulzadeh/appgent/internal/ai"
 	"github.com/arashrasoulzadeh/appgent/internal/rag"
 	"github.com/arashrasoulzadeh/appgent/internal/temporal"
 )
 
 type DesignAgent struct {
-	client   *openrouter.Client
+	provider ai.Provider
 	model    string
 	prompt   *template.Template
 	ragSvc   *rag.Service
 }
 
-func NewDesignAgent(client *openrouter.Client, model string, ragSvc *rag.Service) (*DesignAgent, error) {
+func NewDesignAgent(provider ai.Provider, model string, ragSvc *rag.Service) (*DesignAgent, error) {
 	promptPath := "internal/agents/prompts/design.tmpl"
 	if _, err := os.Stat(promptPath); os.IsNotExist(err) {
 		promptPath = "../../../internal/agents/prompts/design.tmpl"
@@ -29,14 +29,13 @@ func NewDesignAgent(client *openrouter.Client, model string, ragSvc *rag.Service
 	if err != nil {
 		return nil, fmt.Errorf("parse design template: %w", err)
 	}
-	return &DesignAgent{client: client, model: model, prompt: tmpl, ragSvc: ragSvc}, nil
+	return &DesignAgent{provider: provider, model: model, prompt: tmpl, ragSvc: ragSvc}, nil
 }
 
 func (a *DesignAgent) Execute(ctx context.Context, in temporal.DesignInput) (temporal.DesignOutput, error) {
-	// Query RAG for similar design patterns if service is available
 	var ragContext []temporal.DesignPattern
 	if a.ragSvc != nil {
-		queryText := fmt.Sprintf("Design for app with style: %s. Pages: %d, Components: %d", 
+		queryText := fmt.Sprintf("Design for app with style: %s. Pages: %d, Components: %d",
 			in.Spec.StyleDirection, len(in.Spec.Pages), len(in.Spec.Components))
 		patterns, err := a.ragSvc.QuerySimilar(ctx, queryText, 3)
 		if err == nil {
@@ -44,7 +43,6 @@ func (a *DesignAgent) Execute(ctx context.Context, in temporal.DesignInput) (tem
 		}
 	}
 
-	// Add RAG context to the input
 	type DesignInputWithRAG struct {
 		temporal.DesignInput
 		RAGContext []temporal.DesignPattern
@@ -61,7 +59,7 @@ func (a *DesignAgent) Execute(ctx context.Context, in temporal.DesignInput) (tem
 		return temporal.DesignOutput{}, fmt.Errorf("execute template: %w", err)
 	}
 
-	messages := []openrouter.Message{
+	messages := []ai.Message{
 		{Role: "system", Content: "You are an expert visual designer and design systems engineer. Output ONLY valid JSON."},
 		{Role: "user", Content: buf.String()},
 	}
@@ -116,9 +114,9 @@ func (a *DesignAgent) Execute(ctx context.Context, in temporal.DesignInput) (tem
 		"additionalProperties": false,
 	}
 
-	resp, err := a.client.ChatCompletionWithJSONSchema(ctx, a.model, messages, schema, 0.3)
+	resp, err := a.provider.ChatCompletionWithJSONSchema(ctx, a.model, messages, schema, 0.3)
 	if err != nil {
-		return temporal.DesignOutput{}, fmt.Errorf("openrouter call: %w", err)
+		return temporal.DesignOutput{}, fmt.Errorf("AI provider call: %w", err)
 	}
 
 	var output temporal.DesignOutput
