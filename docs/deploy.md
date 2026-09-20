@@ -8,9 +8,12 @@ Dockerfiles (`services/api/Dockerfile`, `services/worker/Dockerfile`,
 ## 1. Provision the server
 
 Any VPS with Docker + Docker Compose plugin installed (Ubuntu 22.04+
-recommended). Open ports `80`/`443` (reverse proxy) — do not expose `5432`,
-`7233`, `8080`, `9000`/`9002` publicly; they're for internal/compose-network
-use and admin access only (tunnel or firewall-restrict them).
+recommended). Open ports `80`/`443` (reverse proxy) — do not expose the
+infra/app host ports (`15432`, `17233`, `18233`, `18080`, `19000`/`19001`,
+`13000`) publicly; they're for internal/compose-network use and admin access
+only (tunnel or firewall-restrict them). These are deliberately non-standard
+port numbers to avoid colliding with anything else already running on a
+shared host — see [docs/environment.md](environment.md) for the full table.
 
 ## 2. Get the code onto the server
 

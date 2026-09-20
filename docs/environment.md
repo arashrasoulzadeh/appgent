@@ -6,6 +6,28 @@ secrets manager for v1 (see [plan.md](../plan.md) §7). `.env.example` at the
 repo root lists every key below with placeholder/dummy values, committed to
 git; the real `.env` is gitignored.
 
+## Docker Compose host ports
+
+`docker-compose.yml` intentionally uses non-standard host ports (right side
+of `host:container` below is the container's own default port, unchanged) to
+avoid colliding with other services already running on a shared box:
+
+| Service | Host port | Container port | Purpose |
+|---|---|---|---|
+| postgres | `15432` | `5432` | direct DB access (admin/debugging only) |
+| temporal | `17233` | `7233` | Temporal gRPC frontend |
+| temporal-ui | `18233` | `8080` | Temporal Web UI |
+| minio | `19000` | `9000` | S3 API |
+| minio | `19001` | `9001` | MinIO console |
+| api | `18080` | `8080` | REST API (put behind reverse proxy for public access) |
+| web | `13000` | `3000` | Next.js (put behind reverse proxy for public access) |
+
+Container-to-container env vars (`POSTGRES_DSN`, `TEMPORAL_HOST_PORT`,
+`OBJECT_STORAGE_ENDPOINT` below) always use the **container** port and the
+Compose service name as host — the host-port table above only matters for
+things reached from outside Docker's network (your browser, `psql` from the
+host, a reverse proxy).
+
 ## Shared
 
 | Var | Example | Used by |
@@ -27,7 +49,7 @@ git; the real `.env` is gitignored.
 | `JWT_SIGNING_SECRET` | `change-me-in-prod` | signs the session cookie |
 | `SESSION_COOKIE_NAME` | `session` | |
 | `SESSION_TTL_HOURS` | `168` | |
-| `CORS_ALLOWED_ORIGIN` | `http://localhost:3000` | Next.js dev origin |
+| `CORS_ALLOWED_ORIGIN` | `http://localhost:13000` | Next.js origin (or your public domain in prod) |
 | `ADMIN_SEED_EMAIL` | `admin` | used by the seed migration/script |
 | `ADMIN_SEED_PASSWORD` | `admin` | plaintext only in local `.env`; hashed at seed time, never stored plain |
 
@@ -48,7 +70,7 @@ git; the real `.env` is gitignored.
 
 | Var | Example | Notes |
 |---|---|---|
-| `NEXT_PUBLIC_API_BASE_URL` | `http://localhost:8080/api/v1` | |
+| `NEXT_PUBLIC_API_BASE_URL` | `http://localhost:18080/api/v1` | or your public API domain in prod |
 
 ## Deferred (sandbox runtime dependent)
 
