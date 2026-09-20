@@ -34,7 +34,22 @@ env:
   NEXT_PUBLIC_API_BASE_URL: http://localhost:8080/api/v1
 
 jobs:
+  go-lint:
+    name: Go Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
+
   go-test:
+    name: Go Tests
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -51,12 +66,9 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-
       - name: Cache Go modules
         uses: actions/cache@v4
         with:
@@ -66,49 +78,48 @@ jobs:
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-
-
       - name: Run Go tests
-        run: go test ./...
-
+        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.out
+          fail_ci_if_error: false
       - name: Build Go binaries
         run: |
           go build ./services/api/cmd/api
           go build ./services/worker/cmd/worker
           go build ./cmd/seed
+          go build ./cmd/seed-patterns
 
   frontend-test:
+    name: Frontend Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'pnpm'
           cache-dependency-path: apps/web/pnpm-lock.yaml
-
       - name: Install dependencies
         working-directory: ./apps/web
         run: pnpm install --frozen-lockfile
-
       - name: Run TypeScript check
         working-directory: ./apps/web
         run: npx tsc --noEmit
-
       - name: Run linter
         working-directory: ./apps/web
         run: pnpm lint
-
       - name: Run unit tests
         working-directory: ./apps/web
         run: pnpm test
-
       - name: Build Next.js
         working-directory: ./apps/web
         run: pnpm build
 
   e2e-test:
+    name: E2E Tests
     runs-on: ubuntu-latest
     needs: [go-test, frontend-test]
     services:
@@ -145,15 +156,11 @@ jobs:
           MINIO_ROOT_USER: minioadmin
           MINIO_ROOT_PASSWORD: minioadmin
         ports: ["9000:9000", "9001:9001"]
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-
       - name: Cache Go modules
         uses: actions/cache@v4
         with:
@@ -163,16 +170,12 @@ jobs:
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-
-
       - name: Build API server
         run: go build -o api ./services/api/cmd/api
-
       - name: Build worker
         run: go build -o worker ./services/worker/cmd/worker
-
       - name: Build seed
         run: go build -o seed ./cmd/seed
-
       - name: Run migrations
         run: |
           ./seed
@@ -180,7 +183,6 @@ jobs:
           POSTGRES_DSN: postgres://appgent:appgent@localhost:5432/appgent?sslmode=disable
           ADMIN_SEED_EMAIL: admin
           ADMIN_SEED_PASSWORD: admin
-
       - name: Start API server
         run: |
           ./api &
@@ -201,7 +203,6 @@ jobs:
           CORS_ALLOWED_ORIGIN: http://localhost:3000
           ADMIN_SEED_EMAIL: admin
           ADMIN_SEED_PASSWORD: admin
-
       - name: Start Temporal worker
         run: |
           ./worker &
@@ -221,28 +222,23 @@ jobs:
           OPENROUTER_MODEL_CODE: nvidia/nemotron-3-ultra:free
           OPENROUTER_MODEL_QA: nvidia/nemotron-3-ultra:free
           OPENROUTER_MODEL_EMBEDDING: nvidia/nemotron-3-ultra:free
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'pnpm'
           cache-dependency-path: apps/web/pnpm-lock.yaml
-
       - name: Install dependencies
         working-directory: ./apps/web
         run: pnpm install --frozen-lockfile
-
       - name: Install Playwright
         working-directory: ./apps/web
-        run: npx playwright install --with-deps chromium
-
+        run: npx playwright install --with-deps webkit
       - name: Run E2E tests
         working-directory: ./apps/web
         run: pnpm exec playwright test
         env:
           NEXT_PUBLIC_API_BASE_URL: http://localhost:8080/api/v1
-
       - name: Upload Playwright report
         if: always()
         uses: actions/upload-artifact@v4
@@ -250,3 +246,43 @@ jobs:
           name: playwright-report
           path: apps/web/playwright-report
           retention-days: 7
+
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    needs: [go-test, frontend-test, e2e-test]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Generate version
+        id: version
+        run: echo "version=$(date +'%Y.%m.%d')-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+      - name: Build binaries
+        run: |
+          CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${{ steps.version.outputs.version }}" -o appgent-api ./services/api/cmd/api
+          CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${{ steps.version.outputs.version }}" -o appgent-worker ./services/worker/cmd/worker
+          CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${{ steps.version.outputs.version }}" -o appgent-seed ./cmd/seed
+          CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${{ steps.version.outputs.version }}" -o appgent-seed-patterns ./cmd/seed-patterns
+      - name: Build frontend
+        working-directory: ./apps/web
+        run: pnpm build
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: Release v${{ steps.version.outputs.version }}
+          files: |
+            appgent-api
+            appgent-worker
+            appgent-seed
+            appgent-seed-patterns
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

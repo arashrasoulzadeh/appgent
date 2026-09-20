@@ -1,0 +1,26 @@
+# Global owners
+* @arashrasoulzadeh
+
+# Go backend
+/internal/ @arashrasoulzadeh
+/services/api/ @arashrasoulzadeh
+/services/worker/ @arashrasoulzadeh
+/cmd/ @arashrasoulzadeh
+
+# Frontend
+/apps/web/ @arashrasoulzadeh
+
+# Infrastructure
+/docker-compose*.yml @arashrasoulzadeh
+/scripts/ @arashrasoulzadeh
+/Makefile @arashrasoulzadeh
+/.golangci.yml @arashrasoulzadeh
+
+# CI/CD
+/.github/workflows/ @arashrasoulzadeh
+/.github/dependabot.yml @arashrasoulzadeh
+
+# Documentation
+/docs/ @arashrasoulzadeh
+README.md @arashrasoulzadeh
+plan.md @arashrasoulzadeh
