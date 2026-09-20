@@ -203,10 +203,6 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash text NOT NULL,
     created_at    timestamptz NOT NULL DEFAULT now()
 );
-
-INSERT INTO users (id, email, password_hash) 
-VALUES ('00000000-0000-0000-0000-000000000001', 'admin', '$2a$10$dummyhash')
-ON CONFLICT (email) DO NOTHING;
 `
 
 const appsMigration = `

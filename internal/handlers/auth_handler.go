@@ -2,12 +2,13 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/arashrasoulzadeh/appgent/internal/auth"
 	"github.com/arashrasoulzadeh/appgent/internal/middleware"
 	"github.com/arashrasoulzadeh/appgent/internal/services"
-	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type AuthHandler struct {
@@ -32,32 +33,36 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// For MVP, just check if user exists and password matches
-	// Real implementation would verify bcrypt hash
-	if req.Email == "admin" && req.Password == "admin" {
-		// Get user from DB
-		// For now, use a fixed UUID for the seeded admin
-		userID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
-		
-		token, err := h.tokenService.GenerateToken(userID.String(), req.Email)
-		if err != nil {
-			http.Error(w, `{"error": "failed to generate token"}`, http.StatusInternalServerError)
+	user, err := h.appService.GetUserByEmail(r.Context(), req.Email)
+	if err != nil {
+		if !errors.Is(err, services.ErrUserNotFound) {
+			http.Error(w, `{"error": "internal error"}`, http.StatusInternalServerError)
 			return
 		}
-
-		h.tokenService.SetCookie(w, token)
-		
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"user": map[string]string{
-				"id":    userID.String(),
-				"email": req.Email,
-			},
-		})
+		http.Error(w, `{"error": "invalid credentials"}`, http.StatusUnauthorized)
 		return
 	}
 
-	http.Error(w, `{"error": "invalid credentials"}`, http.StatusUnauthorized)
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
+		http.Error(w, `{"error": "invalid credentials"}`, http.StatusUnauthorized)
+		return
+	}
+
+	token, err := h.tokenService.GenerateToken(user.ID.String(), user.Email)
+	if err != nil {
+		http.Error(w, `{"error": "failed to generate token"}`, http.StatusInternalServerError)
+		return
+	}
+
+	h.tokenService.SetCookie(w, token)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"user": map[string]string{
+			"id":    user.ID.String(),
+			"email": user.Email,
+		},
+	})
 }
 
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {

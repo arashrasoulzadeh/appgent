@@ -93,9 +93,6 @@ export default function Home() {
             </form>
           </CardContent>
           <CardFooter className="flex flex-col gap-4">
-            <p className="text-sm text-neutral-600 dark:text-neutral-400 text-center">
-              Demo credentials: <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded">admin / admin</code>
-            </p>
             <div className="grid grid-cols-3 gap-2 text-center">
               <div className="p-2 bg-primary-50 dark:bg-primary-900/30 rounded-lg">
                 <Sparkles className="h-4 w-4 mx-auto text-primary-600 dark:text-primary-400 mb-1" />

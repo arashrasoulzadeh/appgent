@@ -65,12 +65,33 @@ type Deployment struct {
 	CreatedAt   time.Time
 }
 
+type User struct {
+	ID           uuid.UUID
+	Email        string
+	PasswordHash string
+}
+
 type AppService struct {
 	pool *pgxpool.Pool
 }
 
 func NewAppService(pool *pgxpool.Pool) *AppService {
 	return &AppService{pool: pool}
+}
+
+var ErrUserNotFound = errors.New("user not found")
+
+func (s *AppService) GetUserByEmail(ctx context.Context, email string) (*User, error) {
+	user := &User{}
+	err := s.pool.QueryRow(ctx, "SELECT id, email, password_hash FROM users WHERE email = $1", email).
+		Scan(&user.ID, &user.Email, &user.PasswordHash)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrUserNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return user, nil
 }
 
 func (s *AppService) Create(ctx context.Context, userID uuid.UUID, name, kind, prompt string) (*App, *Run, error) {
