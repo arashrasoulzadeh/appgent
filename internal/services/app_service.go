@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"regexp"
 	"strings"
@@ -13,56 +14,137 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// nullString/nullTime/nullInt64 marshal sql.Null* as a plain value or null,
+// instead of Go's default {"String":"...","Valid":true} struct encoding.
+func nullString(v sql.NullString) *string {
+	if !v.Valid {
+		return nil
+	}
+	return &v.String
+}
+
+func nullTime(v sql.NullTime) *time.Time {
+	if !v.Valid {
+		return nil
+	}
+	return &v.Time
+}
+
+func nullInt64(v sql.NullInt64) *int64 {
+	if !v.Valid {
+		return nil
+	}
+	return &v.Int64
+}
+
 type App struct {
-	ID        uuid.UUID
-	UserID    uuid.UUID
-	Name      string
-	Slug      string
-	Kind      string
-	Status    string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID        uuid.UUID `json:"id"`
+	UserID    uuid.UUID `json:"-"`
+	Name      string    `json:"name"`
+	Slug      string    `json:"slug"`
+	Kind      string    `json:"kind"`
+	Status    string    `json:"status"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type Run struct {
-	ID                uuid.UUID
-	AppID             uuid.UUID
-	Version           int
-	UserPrompt        string
-	Status            string
-	TemporalWorkflowID string
-	BundlePath        sql.NullString
-	PreviewURL        sql.NullString
-	Error             sql.NullString
-	StartedAt         sql.NullTime
-	FinishedAt        sql.NullTime
-	CreatedAt         time.Time
+	ID                  uuid.UUID      `json:"id"`
+	AppID               uuid.UUID      `json:"app_id"`
+	Version             int            `json:"version"`
+	UserPrompt          string         `json:"user_prompt"`
+	Status              string         `json:"status"`
+	TemporalWorkflowID  string         `json:"-"`
+	BundlePath          sql.NullString `json:"-"`
+	PreviewURL          sql.NullString `json:"-"`
+	Error               sql.NullString `json:"-"`
+	StartedAt           sql.NullTime   `json:"-"`
+	FinishedAt          sql.NullTime   `json:"-"`
+	CreatedAt           time.Time      `json:"created_at"`
+}
+
+func (r *Run) MarshalJSON() ([]byte, error) {
+	type alias Run
+	return json.Marshal(struct {
+		*alias
+		BundlePath string     `json:"bundle_path,omitempty"`
+		PreviewURL string     `json:"preview_url,omitempty"`
+		Error      *string    `json:"error,omitempty"`
+		StartedAt  *time.Time `json:"started_at,omitempty"`
+		FinishedAt *time.Time `json:"finished_at,omitempty"`
+	}{
+		alias:      (*alias)(r),
+		BundlePath: r.BundlePath.String,
+		PreviewURL: r.PreviewURL.String,
+		Error:      nullString(r.Error),
+		StartedAt:  nullTime(r.StartedAt),
+		FinishedAt: nullTime(r.FinishedAt),
+	})
 }
 
 type AgentStep struct {
-	ID          uuid.UUID
-	RunID       uuid.UUID
-	AgentType   string
-	Attempt     int
-	Input       []byte
-	Output      []byte
-	ModelUsed   string
-	TokensUsed  sql.NullInt64
-	Status      string
-	Error       sql.NullString
-	StartedAt   sql.NullTime
-	FinishedAt  sql.NullTime
-	CreatedAt   time.Time
+	ID         uuid.UUID     `json:"-"`
+	RunID      uuid.UUID     `json:"-"`
+	AgentType  string        `json:"agent_type"`
+	Attempt    int           `json:"attempt"`
+	Input      []byte        `json:"-"`
+	Output     []byte        `json:"-"`
+	ModelUsed  string        `json:"model_used"`
+	TokensUsed sql.NullInt64 `json:"-"`
+	Status     string        `json:"status"`
+	Error      sql.NullString `json:"-"`
+	StartedAt  sql.NullTime  `json:"-"`
+	FinishedAt sql.NullTime  `json:"-"`
+	CreatedAt  time.Time     `json:"-"`
+}
+
+func (s *AgentStep) MarshalJSON() ([]byte, error) {
+	type alias AgentStep
+	var summary string
+	if len(s.Output) > 0 {
+		summary = string(s.Output)
+		if len(summary) > 300 {
+			summary = summary[:300] + "..."
+		}
+	}
+	return json.Marshal(struct {
+		*alias
+		TokensUsed    *int64     `json:"tokens_used,omitempty"`
+		Error         *string    `json:"error,omitempty"`
+		StartedAt     *time.Time `json:"started_at,omitempty"`
+		FinishedAt    *time.Time `json:"finished_at,omitempty"`
+		OutputSummary string     `json:"output_summary,omitempty"`
+	}{
+		alias:         (*alias)(s),
+		TokensUsed:    nullInt64(s.TokensUsed),
+		Error:         nullString(s.Error),
+		StartedAt:     nullTime(s.StartedAt),
+		FinishedAt:    nullTime(s.FinishedAt),
+		OutputSummary: summary,
+	})
 }
 
 type Deployment struct {
-	ID          uuid.UUID
-	AppID       uuid.UUID
-	RunID       uuid.UUID
-	URL         sql.NullString
-	Status      string
-	DeployedAt  sql.NullTime
-	CreatedAt   time.Time
+	ID         uuid.UUID      `json:"id"`
+	AppID      uuid.UUID      `json:"-"`
+	RunID      uuid.UUID      `json:"-"`
+	URL        sql.NullString `json:"-"`
+	Status     string         `json:"status"`
+	DeployedAt sql.NullTime   `json:"-"`
+	CreatedAt  time.Time      `json:"created_at"`
+}
+
+func (d *Deployment) MarshalJSON() ([]byte, error) {
+	type alias Deployment
+	return json.Marshal(struct {
+		*alias
+		URL        string     `json:"url,omitempty"`
+		DeployedAt *time.Time `json:"deployed_at,omitempty"`
+	}{
+		alias:      (*alias)(d),
+		URL:        d.URL.String,
+		DeployedAt: nullTime(d.DeployedAt),
+	})
 }
 
 type User struct {
@@ -169,7 +251,10 @@ func (s *AppService) GetByID(ctx context.Context, userID, appID uuid.UUID) (*App
 		&run.ID, &run.AppID, &run.Version, &run.UserPrompt, &run.Status, &run.TemporalWorkflowID,
 		&run.BundlePath, &run.PreviewURL, &run.Error, &run.StartedAt, &run.FinishedAt, &run.CreatedAt,
 	)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
+		return app, nil, nil
+	}
+	if err != nil {
 		return nil, nil, err
 	}
 
