@@ -9,7 +9,7 @@ Dockerfiles (`services/api/Dockerfile`, `services/worker/Dockerfile`,
 
 Any VPS with Docker + Docker Compose plugin installed (Ubuntu 22.04+
 recommended). Open ports `80`/`443` (reverse proxy) — do not expose `5432`,
-`7233`, `8080`, `9000`/`9001` publicly; they're for internal/compose-network
+`7233`, `8080`, `9000`/`9002` publicly; they're for internal/compose-network
 use and admin access only (tunnel or firewall-restrict them).
 
 ## 2. Get the code onto the server

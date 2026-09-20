@@ -17,7 +17,7 @@ This starts:
 - **postgres** (5432) — primary DB, also hosts `pgvector`
 - **temporal** — Temporal dev server (includes its own SQLite/Postgres state
   and the Temporal Web UI on `:8233`)
-- **minio** (9000/9001) — S3-compatible object storage for generated bundles
+- **minio** (9000/9002) — S3-compatible object storage for generated bundles (9002 is the console; remapped from MinIO's default 9001 to avoid host port collisions)
 
 Run migrations (`internal/db/migrations`) against `POSTGRES_DSN` using
 whichever migration tool is chosen (`golang-migrate` recommended):
@@ -49,7 +49,7 @@ cd apps/web && pnpm install && pnpm dev
 - Next.js: http://localhost:3000
 - API: http://localhost:8080
 - Temporal Web UI: http://localhost:8233
-- MinIO console: http://localhost:9001
+- MinIO console: http://localhost:9002
 
 ## Sanity check
 
