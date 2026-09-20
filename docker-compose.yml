@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -50,6 +48,75 @@ services:
       - "9001:9001"
     volumes:
       - minio_data:/data
+
+  migrate:
+    image: migrate/migrate:latest
+    profiles: ["tools"]
+    volumes:
+      - ./internal/db/migrations:/migrations
+    depends_on:
+      - postgres
+    entrypoint:
+      [
+        "migrate",
+        "-path", "/migrations",
+        "-database", "postgres://appgent:appgent@postgres:5432/appgent?sslmode=disable",
+        "up",
+      ]
+
+  seed:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+      target: build
+    profiles: ["tools"]
+    env_file: .env
+    depends_on:
+      - postgres
+    entrypoint: ["go", "run", "./cmd/seed"]
+
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_DSN: postgres://appgent:appgent@postgres:5432/appgent?sslmode=disable
+      TEMPORAL_HOST_PORT: temporal:7233
+      OBJECT_STORAGE_ENDPOINT: http://minio:9000
+    depends_on:
+      - postgres
+      - temporal
+      - minio
+    ports:
+      - "8080:8080"
+
+  worker:
+    build:
+      context: .
+      dockerfile: services/worker/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_DSN: postgres://appgent:appgent@postgres:5432/appgent?sslmode=disable
+      TEMPORAL_HOST_PORT: temporal:7233
+      OBJECT_STORAGE_ENDPOINT: http://minio:9000
+    depends_on:
+      - postgres
+      - temporal
+      - minio
+
+  web:
+    build:
+      context: ./apps/web
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8080/api/v1}
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
 
 volumes:
   postgres_data:

@@ -13,6 +13,7 @@ OpenRouter, orchestrated by Temporal, with live preview and deploy.
 - [docs/agents.md](docs/agents.md) — per-agent prompt specs
 - [docs/environment.md](docs/environment.md) — env var reference
 - [docs/dev-setup.md](docs/dev-setup.md) — local dev setup
+- [docs/deploy.md](docs/deploy.md) — deploying to a server (Docker Compose)
 - [docs/open-questions.md](docs/open-questions.md) — remaining unresolved decision (sandbox runtime)
 
 ## Repo layout
