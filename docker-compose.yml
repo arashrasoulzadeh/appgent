@@ -71,6 +71,8 @@ services:
       target: build
     profiles: ["tools"]
     env_file: .env
+    environment:
+      POSTGRES_DSN: postgres://appgent:appgent@postgres:5432/appgent?sslmode=disable
     depends_on:
       - postgres
     entrypoint: ["go", "run", "./cmd/seed"]
