@@ -281,6 +281,9 @@ func (h *AppHandler) GetRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error": "failed to get run"}`, http.StatusInternalServerError)
 		return
 	}
+	if steps == nil {
+		steps = []*services.AgentStep{}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
