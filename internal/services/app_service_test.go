@@ -6,9 +6,23 @@ import (
 
 	"github.com/arashrasoulzadeh/appgent/internal/db"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	temporalclient "go.temporal.io/sdk/client"
 )
+
+// newTestAppService dials the local dev Temporal server and skips the test
+// if it's unavailable, matching the existing Postgres skip pattern below.
+func newTestAppService(t *testing.T, pool *pgxpool.Pool) *AppService {
+	t.Helper()
+	tc, err := temporalclient.Dial(temporalclient.Options{HostPort: "localhost:7233"})
+	if err != nil {
+		t.Skipf("Temporal not available: %v", err)
+	}
+	t.Cleanup(tc.Close)
+	return NewAppService(pool, tc)
+}
 
 func TestGenerateSlug(t *testing.T) {
 	tests := []struct {
@@ -58,7 +72,7 @@ func TestAppService_Create_Integration(t *testing.T) {
 	}
 	defer pool.Close()
 
-	service := NewAppService(pool)
+	service := newTestAppService(t, pool)
 	userID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 
 	app, run, err := service.Create(ctx, userID, "Test App", "website", "A test app")
@@ -91,7 +105,7 @@ func TestAppService_List_Integration(t *testing.T) {
 	}
 	defer pool.Close()
 
-	service := NewAppService(pool)
+	service := newTestAppService(t, pool)
 	userID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 
 	// Create a test app
@@ -124,7 +138,7 @@ func TestAppService_GetByID_Integration(t *testing.T) {
 	}
 	defer pool.Close()
 
-	service := NewAppService(pool)
+	service := newTestAppService(t, pool)
 	userID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 
 	// Create a test app
@@ -151,7 +165,7 @@ func TestAppService_Delete_Integration(t *testing.T) {
 	}
 	defer pool.Close()
 
-	service := NewAppService(pool)
+	service := newTestAppService(t, pool)
 	userID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 
 	// Create a test app
@@ -178,7 +192,7 @@ func TestAppService_Regenerate_Integration(t *testing.T) {
 	}
 	defer pool.Close()
 
-	service := NewAppService(pool)
+	service := newTestAppService(t, pool)
 	userID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 
 	// Create a test app
@@ -214,7 +228,7 @@ func TestAppService_GetRuns_Integration(t *testing.T) {
 	}
 	defer pool.Close()
 
-	service := NewAppService(pool)
+	service := newTestAppService(t, pool)
 	userID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 
 	// Create a test app with multiple runs

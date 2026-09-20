@@ -8,13 +8,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/arashrasoulzadeh/appgent/internal/auth"
 	"github.com/arashrasoulzadeh/appgent/internal/config"
 	"github.com/arashrasoulzadeh/appgent/internal/db"
 	"github.com/arashrasoulzadeh/appgent/internal/handlers"
 	"github.com/arashrasoulzadeh/appgent/internal/logger"
 	"github.com/arashrasoulzadeh/appgent/internal/middleware"
 	"github.com/arashrasoulzadeh/appgent/internal/services"
-	"github.com/arashrasoulzadeh/appgent/internal/auth"
+	temporalclient "go.temporal.io/sdk/client"
 )
 
 func main() {
@@ -33,6 +34,16 @@ func main() {
 	// (see docs/deploy.md / docs/dev-setup.md) against internal/db/migrations,
 	// not by the API process itself.
 
+	temporalClient, err := temporalclient.Dial(temporalclient.Options{
+		HostPort:  cfg.TemporalHostPort,
+		Namespace: cfg.TemporalNamespace,
+	})
+	if err != nil {
+		log.Error("Failed to connect to Temporal", "error", err)
+		os.Exit(1)
+	}
+	defer temporalClient.Close()
+
 	// Initialize services
 	tokenService := auth.NewTokenService(
 		cfg.JWTSigningSecret,
@@ -41,7 +52,7 @@ func main() {
 		false, // secure = false for local dev
 	)
 
-	appService := services.NewAppService(pool)
+	appService := services.NewAppService(pool, temporalClient)
 
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(tokenService, appService)

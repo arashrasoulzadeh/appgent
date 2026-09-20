@@ -9,10 +9,14 @@ import (
 	"strings"
 	"time"
 
+	apptemporal "github.com/arashrasoulzadeh/appgent/internal/temporal"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	temporalclient "go.temporal.io/sdk/client"
 )
+
+const generationTaskQueue = "appgent-generation"
 
 // nullString/nullTime/nullInt64 marshal sql.Null* as a plain value or null,
 // instead of Go's default {"String":"...","Valid":true} struct encoding.
@@ -154,11 +158,12 @@ type User struct {
 }
 
 type AppService struct {
-	pool *pgxpool.Pool
+	pool     *pgxpool.Pool
+	temporal temporalclient.Client
 }
 
-func NewAppService(pool *pgxpool.Pool) *AppService {
-	return &AppService{pool: pool}
+func NewAppService(pool *pgxpool.Pool, temporal temporalclient.Client) *AppService {
+	return &AppService{pool: pool, temporal: temporal}
 }
 
 var ErrUserNotFound = errors.New("user not found")
@@ -208,12 +213,15 @@ func (s *AppService) Create(ctx context.Context, userID uuid.UUID, name, kind, p
 		return nil, nil, err
 	}
 
+	runID := uuid.New()
+	workflowID := "run-" + runID.String()
+
 	run := &Run{}
 	err = tx.QueryRow(ctx, `
-		INSERT INTO generation_runs (app_id, version, user_prompt, status, temporal_workflow_id)
-		VALUES ($1, 1, $2, 'queued', $3)
+		INSERT INTO generation_runs (id, app_id, version, user_prompt, status, temporal_workflow_id)
+		VALUES ($1, $2, 1, $3, 'queued', $4)
 		RETURNING id, app_id, version, user_prompt, status, temporal_workflow_id, bundle_path, preview_url, error, started_at, finished_at, created_at
-	`, app.ID, prompt, uuid.New().String()).Scan(
+	`, runID, app.ID, prompt, workflowID).Scan(
 		&run.ID, &run.AppID, &run.Version, &run.UserPrompt, &run.Status, &run.TemporalWorkflowID,
 		&run.BundlePath, &run.PreviewURL, &run.Error, &run.StartedAt, &run.FinishedAt, &run.CreatedAt,
 	)
@@ -222,6 +230,19 @@ func (s *AppService) Create(ctx context.Context, userID uuid.UUID, name, kind, p
 	}
 
 	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, err
+	}
+
+	_, err = s.temporal.ExecuteWorkflow(ctx, temporalclient.StartWorkflowOptions{
+		ID:        workflowID,
+		TaskQueue: generationTaskQueue,
+	}, apptemporal.GenerateAppWorkflow, apptemporal.GenerateAppInput{
+		RunID:      run.ID,
+		AppID:      app.ID,
+		AppKind:    app.Kind,
+		UserPrompt: prompt,
+	})
+	if err != nil {
 		return nil, nil, err
 	}
 
@@ -301,8 +322,8 @@ func (s *AppService) Regenerate(ctx context.Context, userID, appID uuid.UUID, pr
 	}
 	defer tx.Rollback(ctx)
 
-	var appName string
-	err = tx.QueryRow(ctx, `SELECT name FROM apps WHERE id = $1 AND user_id = $2`, appID, userID).Scan(&appName)
+	var appName, appKind string
+	err = tx.QueryRow(ctx, `SELECT name, kind FROM apps WHERE id = $1 AND user_id = $2`, appID, userID).Scan(&appName, &appKind)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrAppNotFound
@@ -323,12 +344,15 @@ func (s *AppService) Regenerate(ctx context.Context, userID, appID uuid.UUID, pr
 		return nil, err
 	}
 
+	runID := uuid.New()
+	workflowID := "run-" + runID.String()
+
 	run := &Run{}
 	err = tx.QueryRow(ctx, `
-		INSERT INTO generation_runs (app_id, version, user_prompt, status, temporal_workflow_id)
-		VALUES ($1, $2, $3, 'queued', $4)
+		INSERT INTO generation_runs (id, app_id, version, user_prompt, status, temporal_workflow_id)
+		VALUES ($1, $2, $3, $4, 'queued', $5)
 		RETURNING id, app_id, version, user_prompt, status, temporal_workflow_id, bundle_path, preview_url, error, started_at, finished_at, created_at
-	`, appID, version, prompt, uuid.New().String()).Scan(
+	`, runID, appID, version, prompt, workflowID).Scan(
 		&run.ID, &run.AppID, &run.Version, &run.UserPrompt, &run.Status, &run.TemporalWorkflowID,
 		&run.BundlePath, &run.PreviewURL, &run.Error, &run.StartedAt, &run.FinishedAt, &run.CreatedAt,
 	)
@@ -342,6 +366,19 @@ func (s *AppService) Regenerate(ctx context.Context, userID, appID uuid.UUID, pr
 	}
 
 	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	_, err = s.temporal.ExecuteWorkflow(ctx, temporalclient.StartWorkflowOptions{
+		ID:        workflowID,
+		TaskQueue: generationTaskQueue,
+	}, apptemporal.GenerateAppWorkflow, apptemporal.GenerateAppInput{
+		RunID:      run.ID,
+		AppID:      appID,
+		AppKind:    appKind,
+		UserPrompt: prompt,
+	})
+	if err != nil {
 		return nil, err
 	}
 
