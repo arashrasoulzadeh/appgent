@@ -12,11 +12,18 @@ export default defineConfig({
     baseURL: 'http://localhost:3000',
     trace: 'on-first-retry',
   },
+  // Chromium, not WebKit: WebKit's cookie/ITP handling in headless CI is
+  // markedly stricter than Chromium's and has repeatedly dropped the
+  // session cookie set by the API (a different port on localhost) between
+  // login's POST and the following navigation — every test past the
+  // login step failed with the app stuck on /login despite the login
+  // request itself succeeding. Chromium is the standard, reliable choice
+  // for headless CI E2E and doesn't have this problem.
   projects: [
     {
-      name: 'webkit',
-      use: { 
-        ...devices['Desktop Safari'],
+      name: 'chromium',
+      use: {
+        ...devices['Desktop Chrome'],
       },
     },
   ],

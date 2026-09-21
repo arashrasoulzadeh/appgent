@@ -251,7 +251,7 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Install Playwright
         working-directory: ./apps/web
-        run: npx playwright install --with-deps webkit
+        run: npx playwright install --with-deps chromium
       - name: Run E2E tests
         working-directory: ./apps/web
         run: pnpm exec playwright test
