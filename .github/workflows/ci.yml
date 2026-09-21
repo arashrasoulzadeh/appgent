@@ -154,7 +154,7 @@ jobs:
           TEMPORAL_ADDRESS: temporal:7233
         ports: ["8233:8080"]
       minio:
-        image: minio/minio:latest
+        image: quay.io/minio/minio:latest
         command: server /data --console-address ":9001"
         env:
           MINIO_ROOT_USER: minioadmin
