@@ -572,3 +572,51 @@ func TestGenerateAppWorkflow_PublishFailureDoesNotFailRun(t *testing.T) {
 
 	env.AssertExpectations(t)
 }
+
+// TestGenerateAppWorkflow_ComponentFailureIsFatal is a regression test for
+// a real production bug: a component (e.g. Header, ContactForm) failing
+// after its retries was treated like a skippable page and silently
+// dropped, but other already-generated files (layout.tsx, pages) `import`
+// components by name — a missing component guarantees a build failure
+// ("Module not found"), it doesn't degrade gracefully like a missing page
+// does. Only page-target failures should be non-fatal.
+func TestGenerateAppWorkflow_ComponentFailureIsFatal(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := newTestEnv(&suite)
+
+	env.OnActivity("PlanActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.PlanOutput{
+			Pages:      []apptemporal.PageSpec{{Name: "Home", Path: "/"}},
+			Components: []apptemporal.ComponentSpec{{Name: "Header", Type: "layout"}},
+		}, nil)
+	env.OnActivity("DesignActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.DesignOutput{}, nil)
+	env.OnActivity("CodeActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.CodeInput) (apptemporal.CodeOutput, error) {
+			if in.TargetComponent != nil && in.TargetComponent.Name == "Header" {
+				return apptemporal.CodeOutput{}, fmt.Errorf("model returned invalid output")
+			}
+			key := "shared"
+			if in.TargetPage != nil {
+				key = in.TargetPage.Name
+			}
+			return apptemporal.CodeOutput{Files: map[string]string{key + ".tsx": "x"}}, nil
+		})
+	// QAActivity is deliberately not mocked here — the component failure
+	// must be fatal before generation ever reaches the QA loop.
+
+	var persistedStatus string
+	env.OnActivity("PersistRunResultActivity", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Run(func(args mock.Arguments) {
+			persistedStatus = args.Get(3).(apptemporal.GenerateAppResult).Status
+		}).
+		Return(nil)
+
+	env.ExecuteWorkflow(apptemporal.GenerateAppWorkflow, newInput())
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.Error(t, env.GetWorkflowError())
+	require.Equal(t, "failed", persistedStatus, "a persistently failing component must fail the run, not silently ship without it")
+
+	env.AssertExpectations(t)
+}

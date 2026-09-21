@@ -142,6 +142,28 @@ export default function AppDetailPage() {
     loadDeployments()
   }, [appId, loadApp, loadRuns, loadDeployments])
 
+  // Polls every 1s while work is actually in progress — the selected run
+  // hasn't reached a terminal status yet (still generating/publishing), or
+  // a deployment is mid-promote — so the page reflects live progress
+  // (agent step statuses, run status, deployment status) without the user
+  // needing to manually reload. Stops polling once everything's terminal,
+  // rather than an unconditional interval running forever.
+  const runInProgress = selectedRun?.status === "queued" || selectedRun?.status === "running"
+  const deploymentInProgress = deployments.some((d) => d.status === "deploying")
+  useEffect(() => {
+    if (!runInProgress && !deploymentInProgress) return
+    const interval = setInterval(() => {
+      if (runInProgress && selectedRun) {
+        loadRunDetails(selectedRun.id)
+      }
+      loadRuns()
+      if (deploymentInProgress) {
+        loadDeployments()
+      }
+    }, 1000)
+    return () => clearInterval(interval)
+  }, [runInProgress, deploymentInProgress, selectedRun, loadRunDetails, loadRuns, loadDeployments])
+
   const handleRegenerate = async (e?: React.FormEvent) => {
     e?.preventDefault()
     setRegenerating(true)

@@ -43,6 +43,16 @@ export default function DashboardPage() {
     loadApps()
   }, [loadApps])
 
+  // Polls every 1s while any app is still generating, so status badges
+  // (generating -> ready/needs_review/failed) update on their own instead
+  // of requiring a manual reload. Stops once nothing's in progress.
+  const anyGenerating = apps.some((a) => a.status === "generating")
+  useEffect(() => {
+    if (!anyGenerating) return
+    const interval = setInterval(loadApps, 1000)
+    return () => clearInterval(interval)
+  }, [anyGenerating, loadApps])
+
   const handleCreateApp = async (e: React.FormEvent) => {
     e.preventDefault()
     setCreateLoading(true)
