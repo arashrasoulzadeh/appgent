@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +19,24 @@ import (
 )
 
 const generationTaskQueue = "appgent-generation"
+
+// codeGenParallel reads CODE_GEN_PARALLEL (default true) to decide whether
+// a run's code-generation targets (pages/components/shared files) are
+// generated concurrently or strictly one at a time. Sequential mode trades
+// speed for lower peak concurrent load on the AI provider (useful for
+// small local models like Ollama, or to keep OpenRouter free-tier rate
+// limits from tripping mid-run).
+func codeGenParallel() bool {
+	v := os.Getenv("CODE_GEN_PARALLEL")
+	if v == "" {
+		return true
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return true
+	}
+	return b
+}
 
 // nullString/nullTime/nullInt64 marshal sql.Null* as a plain value or null,
 // instead of Go's default {"String":"...","Valid":true} struct encoding.
@@ -276,10 +296,11 @@ func (s *AppService) Create(ctx context.Context, userID uuid.UUID, name, kind, p
 		ID:        workflowID,
 		TaskQueue: generationTaskQueue,
 	}, apptemporal.GenerateAppWorkflow, apptemporal.GenerateAppInput{
-		RunID:      run.ID,
-		AppID:      app.ID,
-		AppKind:    app.Kind,
-		UserPrompt: prompt,
+		RunID:        run.ID,
+		AppID:        app.ID,
+		AppKind:      app.Kind,
+		UserPrompt:   prompt,
+		ParallelCode: codeGenParallel(),
 	})
 	if err != nil {
 		// The DB rows were already committed; mark them failed instead of
@@ -416,10 +437,11 @@ func (s *AppService) Regenerate(ctx context.Context, userID, appID uuid.UUID, pr
 		ID:        workflowID,
 		TaskQueue: generationTaskQueue,
 	}, apptemporal.GenerateAppWorkflow, apptemporal.GenerateAppInput{
-		RunID:      run.ID,
-		AppID:      appID,
-		AppKind:    appKind,
-		UserPrompt: prompt,
+		RunID:        run.ID,
+		AppID:        appID,
+		AppKind:      appKind,
+		UserPrompt:   prompt,
+		ParallelCode: codeGenParallel(),
 	})
 	if err != nil {
 		// The DB rows were already committed; mark them failed instead of

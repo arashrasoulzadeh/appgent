@@ -13,6 +13,12 @@ type GenerateAppInput struct {
 	AppID      uuid.UUID
 	AppKind    string
 	UserPrompt string
+	// ParallelCode controls whether code-generation targets (pages,
+	// components, shared/root files) run concurrently (rolling window of
+	// maxParallelCode) or strictly one at a time. Defaults to true (the
+	// zero value is false, so callers must set it explicitly — see
+	// AppService.Create/Regenerate, which default it from an env var).
+	ParallelCode bool
 }
 
 type GenerateAppResult struct {
@@ -251,7 +257,10 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 	// persistent failure. The shared/root target is the one exception — an
 	// app with no layout.tsx/package.json can't run at all, so its failure
 	// after retries is still treated as fatal for this call.
-	const maxParallelCode = 5
+	maxParallelCode := 5
+	if !in.ParallelCode {
+		maxParallelCode = 1
+	}
 	const maxTargetRetries = 1
 	type codeTarget struct {
 		page      *PageSpec

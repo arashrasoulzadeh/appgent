@@ -16,10 +16,11 @@ import (
 
 func newInput() apptemporal.GenerateAppInput {
 	return apptemporal.GenerateAppInput{
-		RunID:      uuid.New(),
-		AppID:      uuid.New(),
-		AppKind:    "website",
-		UserPrompt: "a portfolio site",
+		RunID:        uuid.New(),
+		AppID:        uuid.New(),
+		AppKind:      "website",
+		UserPrompt:   "a portfolio site",
+		ParallelCode: true,
 	}
 }
 
@@ -411,6 +412,72 @@ func TestGenerateAppWorkflow_CodeRetriesOnlyFailedTarget(t *testing.T) {
 	require.Equal(t, 2, callCounts["page:About"])
 	require.Equal(t, 1, callCounts["page:Home"])
 	require.Equal(t, 1, callCounts["shared"])
+
+	env.AssertExpectations(t)
+}
+
+// TestGenerateAppWorkflow_SequentialCodeWhenParallelDisabled verifies that
+// setting ParallelCode: false makes code generation run strictly one target
+// at a time — never more than one CodeActivity call in flight — instead of
+// the default rolling window of up to 5 concurrent calls.
+func TestGenerateAppWorkflow_SequentialCodeWhenParallelDisabled(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := newTestEnv(&suite)
+
+	pages := []apptemporal.PageSpec{
+		{Name: "Home", Path: "/"},
+		{Name: "About", Path: "/about"},
+		{Name: "Contact", Path: "/contact"},
+	}
+
+	env.OnActivity("PlanActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.PlanOutput{Pages: pages}, nil)
+	env.OnActivity("DesignActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.DesignOutput{}, nil)
+
+	var mu sync.Mutex
+	inFlight := 0
+	maxInFlight := 0
+	calls := 0
+	env.OnActivity("CodeActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.CodeInput) (apptemporal.CodeOutput, error) {
+			mu.Lock()
+			inFlight++
+			calls++
+			if inFlight > maxInFlight {
+				maxInFlight = inFlight
+			}
+			key := "shared"
+			if in.TargetPage != nil {
+				key = in.TargetPage.Name
+			}
+			mu.Unlock()
+
+			mu.Lock()
+			inFlight--
+			mu.Unlock()
+			return apptemporal.CodeOutput{Files: map[string]string{key + ".tsx": "x"}}, nil
+		})
+	env.OnActivity("QAActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.QAOutput{Passed: true}, nil)
+	env.OnActivity("PersistRunResultActivity", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(nil)
+
+	in := newInput()
+	in.ParallelCode = false
+	env.ExecuteWorkflow(apptemporal.GenerateAppWorkflow, in)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	var result apptemporal.GenerateAppResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, "succeeded", result.Status)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, 4, calls) // 1 shared + 3 pages
+	require.Equal(t, 1, maxInFlight, "ParallelCode: false must never have more than 1 CodeActivity call in flight")
 
 	env.AssertExpectations(t)
 }
