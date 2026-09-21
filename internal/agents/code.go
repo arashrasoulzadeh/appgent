@@ -3,9 +3,9 @@ package agents
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"text/template"
 
@@ -13,6 +13,35 @@ import (
 	"github.com/arashrasoulzadeh/appgent/internal/rag"
 	"github.com/arashrasoulzadeh/appgent/internal/temporal"
 )
+
+// fileBlockRe matches the delimited file-block output format described in
+// prompts/code.tmpl:
+//
+//	>>>FILE: path/to/file.tsx
+//	...raw content, unescaped...
+//	>>>ENDFILE
+//
+// Deliberately NOT JSON: asking a model to JSON-encode multi-line source
+// code as a string value is a well-known reliability trap — any raw
+// newline, quote, or backslash the model forgets to escape produces
+// invalid JSON, and free/weaker models get this wrong constantly on
+// anything beyond trivial files (seen in production: "invalid character
+// '\n' in string literal", "invalid character ”' in string escape
+// code"). A delimited plain-text format needs no escaping at all, so
+// there's nothing for the model to get wrong here.
+var fileBlockRe = regexp.MustCompile(`(?s)>>>FILE:\s*(\S+)\s*\n(.*?)\n>>>ENDFILE`)
+
+func parseFileBlocks(content string) (map[string]string, error) {
+	matches := fileBlockRe.FindAllStringSubmatch(content, -1)
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("no >>>FILE blocks found in response")
+	}
+	files := make(map[string]string, len(matches))
+	for _, m := range matches {
+		files[strings.TrimSpace(m[1])] = m[2]
+	}
+	return files, nil
+}
 
 type CodeAgent struct {
 	provider ai.Provider
@@ -63,7 +92,7 @@ func (a *CodeAgent) Execute(ctx context.Context, in temporal.CodeInput) (tempora
 	}
 
 	messages := []ai.Message{
-		{Role: "system", Content: "You are an expert Next.js, TypeScript, and Tailwind CSS developer. Output ONLY valid JSON mapping file paths to contents."},
+		{Role: "system", Content: "You are an expert Next.js, TypeScript, and Tailwind CSS developer. Output ONLY the delimited file-block format described in the prompt — no JSON, no markdown code fences around the whole response, no commentary."},
 		{Role: "user", Content: buf.String()},
 	}
 
@@ -77,10 +106,9 @@ func (a *CodeAgent) Execute(ctx context.Context, in temporal.CodeInput) (tempora
 		return temporal.CodeOutput{}, fmt.Errorf("AI provider call: %w", err)
 	}
 
-	var files map[string]string
-	err = json.Unmarshal([]byte(resp.Choices[0].Message.Content), &files)
+	files, err := parseFileBlocks(resp.Choices[0].Message.Content)
 	if err != nil {
-		return temporal.CodeOutput{}, fmt.Errorf("unmarshal code output: %w", err)
+		return temporal.CodeOutput{}, fmt.Errorf("parse code output: %w", err)
 	}
 
 	totalSize := 0

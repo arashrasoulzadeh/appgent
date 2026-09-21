@@ -167,11 +167,15 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 	}
 	ctx = workflow.WithActivityOptions(ctx, ao)
 
-	// CodeActivity generates a full file tree per call and is the slowest
-	// step by far — give it its own longer timeout rather than sharing the
-	// 5-minute default with the lighter Plan/Design/QA activities.
+	// CodeActivity generates one page/shared-file-set per call and can be
+	// the slowest step when the underlying model is a slow/overloaded
+	// free-tier one — give it its own longer timeout rather than sharing
+	// the 5-minute default with the lighter Plan/Design/QA activities.
+	// The AI provider HTTP client itself times out at 240s (internal/ai);
+	// with up to 3 retries that's up to 12 minutes, so this needs real
+	// headroom above that, not just above one attempt.
 	codeCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		StartToCloseTimeout: 10 * time.Minute,
+		StartToCloseTimeout: 15 * time.Minute,
 		RetryPolicy: &temporal.RetryPolicy{
 			MaximumAttempts: 3,
 			InitialInterval: 5 * time.Second,

@@ -70,16 +70,35 @@ Generate ONLY the shared/root files — do NOT generate any page route files (th
 {{end}}
 
 ## Output Format:
-Return a JSON object where keys are relative file paths and values are file contents.
-Example:
-{
-  "package.json": "...",
-  "next.config.js": "...",
-  "tsconfig.json": "...",
-  "src/app/layout.tsx": "...",
-  "src/app/page.tsx": "...",
-  "src/app/globals.css": "..."
+Output ONE block per file using this EXACT delimiter format — no JSON, no markdown code fences wrapping the whole response, no commentary before/after:
+
+>>>FILE: relative/path/to/file.ext
+<the file's raw, complete, unescaped content — exactly as it should appear on disk, real newlines, real quotes, nothing escaped>
+>>>ENDFILE
+
+Example (two files):
+
+>>>FILE: src/app/page.tsx
+export default function Home() {
+  return (
+    <main className="min-h-screen p-8">
+      <h1 className="text-4xl font-bold">Welcome</h1>
+    </main>
+  )
 }
+>>>ENDFILE
+
+>>>FILE: src/app/globals.css
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+>>>ENDFILE
+
+Rules:
+- Each `>>>FILE: <path>` line starts a new file; everything until the next `>>>ENDFILE` line is that file's exact content.
+- Do NOT escape anything — no `\n`, no `\"`, no backslash-escaping of any kind. Write the code exactly as it should appear in the file.
+- Do NOT wrap individual files' content in markdown code fences (no ` ``` `).
+- Do NOT emit anything before the first `>>>FILE:` or after the last `>>>ENDFILE`.
 
 ## Guidelines:
 1. **Stay in scope**: only return files for what "Your scope for this call" above describes — either the one target page, or the shared/root files. Other parallel calls handle the rest; returning files outside your scope will overwrite or conflict with their output when everything is merged.
@@ -91,4 +110,4 @@ Example:
 7. **TypeScript**: Strict mode, proper types for props and data.
 8. **Accessibility**: Semantic HTML, alt text, proper heading hierarchy, focus states.
 9. **PWA**: If kind=pwa and you're generating shared/root files, manifest.json + sw.js are HARD REQUIREMENTS.
-10. Output MUST be valid JSON (object with file path → content mapping), containing ONLY the files in your scope.
+10. Output MUST use the `>>>FILE: <path>` / `>>>ENDFILE` delimited format above, containing ONLY the files in your scope.

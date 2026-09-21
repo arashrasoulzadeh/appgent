@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/arashrasoulzadeh/appgent/internal/agents"
@@ -145,8 +146,10 @@ func TestDesignAgentExecute(t *testing.T) {
 }
 
 func TestCodeAgentExecute(t *testing.T) {
-	filesJSON := `{"src/app/page.tsx":"export default function Home(){return null}"}`
-	srv := newJSONServer(t, filesJSON)
+	body := ">>>FILE: src/app/page.tsx\n" +
+		"export default function Home(){return null}\n" +
+		">>>ENDFILE"
+	srv := newJSONServer(t, body)
 	defer srv.Close()
 
 	provider := ai.NewOpenRouterProvider(ai.ProviderConfig{APIKey: "k", BaseURL: srv.URL})
@@ -167,15 +170,74 @@ func TestCodeAgentExecute(t *testing.T) {
 	}
 }
 
+// TestCodeAgentExecute_UnescapedContent is the regression test for why the
+// output format moved off JSON: real generated code is full of quotes,
+// apostrophes, and newlines that a model constantly fails to JSON-escape
+// correctly (seen in production: "invalid character '\n' in string
+// literal", "invalid character ”' in string escape code"). The delimited
+// format needs no escaping, so a response like this — which would have
+// broken json.Unmarshal — must parse cleanly.
+func TestCodeAgentExecute_UnescapedContent(t *testing.T) {
+	body := `>>>FILE: src/app/page.tsx
+export default function Home() {
+  const msg = "she said "hi" to me, then left \ came back"
+  return (
+    <main>
+      <h1>Don't panic</h1>
+      <p>{msg}</p>
+    </main>
+  )
+}
+>>>ENDFILE
+
+>>>FILE: src/app/globals.css
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+>>>ENDFILE`
+	srv := newJSONServer(t, body)
+	defer srv.Close()
+
+	provider := ai.NewOpenRouterProvider(ai.ProviderConfig{APIKey: "k", BaseURL: srv.URL})
+	agent, err := agents.NewCodeAgent(provider, "test-model", nil)
+	if err != nil {
+		t.Fatalf("NewCodeAgent: %v", err)
+	}
+
+	out, err := agent.Execute(context.Background(), temporal.CodeInput{
+		Spec:    temporal.PlanOutput{},
+		AppKind: "website",
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v (this content would have broken JSON parsing)", err)
+	}
+	if len(out.Files) != 2 {
+		t.Fatalf("expected 2 files, got %d: %+v", len(out.Files), out.Files)
+	}
+	page, ok := out.Files["src/app/page.tsx"]
+	if !ok {
+		t.Fatal("missing src/app/page.tsx")
+	}
+	if !strings.Contains(page, `Don't panic`) {
+		t.Errorf("expected raw apostrophe preserved unescaped, got: %s", page)
+	}
+	if !strings.Contains(page, `she said "hi" to me, then left \ came back`) {
+		t.Errorf("expected raw quotes and backslash preserved unescaped, got: %s", page)
+	}
+	if _, ok := out.Files["src/app/globals.css"]; !ok {
+		t.Error("missing src/app/globals.css")
+	}
+}
+
 func TestCodeAgentExecute_BundleTooLarge(t *testing.T) {
-	// Build a JSON payload whose single file content exceeds the 2MB cap
-	// enforced by CodeAgent.Execute.
-	big := make([]byte, 2*1024*1024+1024)
+	// Build a delimited file block whose content exceeds the 500KB per-call
+	// cap enforced by CodeAgent.Execute.
+	big := make([]byte, 500*1024+1024)
 	for i := range big {
 		big[i] = 'a'
 	}
-	payload, _ := json.Marshal(map[string]string{"big.txt": string(big)})
-	srv := newJSONServer(t, string(payload))
+	body := ">>>FILE: big.txt\n" + string(big) + "\n>>>ENDFILE"
+	srv := newJSONServer(t, body)
 	defer srv.Close()
 
 	provider := ai.NewOpenRouterProvider(ai.ProviderConfig{APIKey: "k", BaseURL: srv.URL})
@@ -190,6 +252,9 @@ func TestCodeAgentExecute_BundleTooLarge(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected bundle-too-large error")
+	}
+	if !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("expected a size-cap error, got: %v", err)
 	}
 }
 
