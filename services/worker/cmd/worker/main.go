@@ -59,6 +59,7 @@ func main() {
 		log.Fatalf("Failed to connect to object storage: %v", err)
 	}
 	agents.SetProvisioner(sandbox.NewStaticExportProvisioner(storageClient, cfg.ObjectStorageBucket))
+	agents.SetBuilder(sandbox.NewBuilder())
 
 	// Register workflow and activities. Activities are registered under
 	// explicit names matching what GenerateAppWorkflow references by

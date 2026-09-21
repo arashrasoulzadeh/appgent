@@ -219,10 +219,18 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 	})
 	codeAttempt := 0
 
+	// PublishBundleActivity now runs `npm install && npm run build` in an
+	// ephemeral container before uploading — much slower than a plain
+	// object-storage upload, so this needs real headroom above the
+	// Builder's own internal 10-minute timeout. A build failure from bad
+	// generated code fails identically on every attempt, so retries exist
+	// only for transient infra blips (npm registry, docker daemon) — 2 is
+	// plenty, unlike a 3-attempt budget that'd just triple the wasted time
+	// on a genuinely broken build.
 	publishCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: 15 * time.Minute,
 		RetryPolicy: &temporal.RetryPolicy{
-			MaximumAttempts: 3,
+			MaximumAttempts: 2,
 			InitialInterval: 5 * time.Second,
 		},
 	})
