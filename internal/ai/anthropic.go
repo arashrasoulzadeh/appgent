@@ -25,7 +25,7 @@ func NewAnthropicProvider(config ProviderConfig) *AnthropicProvider {
 		apiKey:  config.APIKey,
 		baseURL: baseURL,
 		httpClient: &http.Client{
-			Timeout: 120 * time.Second,
+			Timeout: 240 * time.Second,
 		},
 	}
 }
@@ -52,10 +52,10 @@ type anthropicRequest struct {
 }
 
 type anthropicResponse struct {
-	ID           string `json:"id"`
-	Type         string `json:"type"`
-	Role         string `json:"role"`
-	Content      []struct {
+	ID      string `json:"id"`
+	Type    string `json:"type"`
+	Role    string `json:"role"`
+	Content []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	} `json:"content"`

@@ -23,7 +23,7 @@ func NewOllamaProvider(config ProviderConfig) *OllamaProvider {
 	return &OllamaProvider{
 		baseURL: baseURL,
 		httpClient: &http.Client{
-			Timeout: 120 * time.Second,
+			Timeout: 240 * time.Second,
 		},
 	}
 }
@@ -46,10 +46,10 @@ func (p *OllamaProvider) AvailableModels() []string {
 }
 
 type ollamaRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
-	Stream   bool      `json:"stream"`
-	Format   string    `json:"format,omitempty"`
+	Model    string                 `json:"model"`
+	Messages []Message              `json:"messages"`
+	Stream   bool                   `json:"stream"`
+	Format   string                 `json:"format,omitempty"`
 	Options  map[string]interface{} `json:"options,omitempty"`
 }
 

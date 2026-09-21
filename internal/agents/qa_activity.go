@@ -13,11 +13,15 @@ func QAActivity(ctx context.Context, in temporal.QAInput) (temporal.QAOutput, er
 	}
 
 	model := modelOrDefault(getModelForAgent("qa"), provider)
+	stepID := startStep(ctx, in.RunID, "qa", in.Attempt, model, in)
 
 	agent, err := NewQAAgent(provider, model)
 	if err != nil {
+		finishStep(ctx, stepID, nil, err)
 		return temporal.QAOutput{}, err
 	}
 
-	return agent.Execute(ctx, in)
+	out, err := agent.Execute(ctx, in)
+	finishStep(ctx, stepID, out, err)
+	return out, err
 }

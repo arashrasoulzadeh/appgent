@@ -29,19 +29,27 @@ func newInput() apptemporal.GenerateAppInput {
 func newTestEnv(suite *testsuite.WorkflowTestSuite) *testsuite.TestWorkflowEnvironment {
 	env := suite.NewTestWorkflowEnvironment()
 	env.RegisterActivityWithOptions(
-		func(context.Context, apptemporal.PlanInput) (apptemporal.PlanOutput, error) { return apptemporal.PlanOutput{}, nil },
+		func(context.Context, apptemporal.PlanInput) (apptemporal.PlanOutput, error) {
+			return apptemporal.PlanOutput{}, nil
+		},
 		activity.RegisterOptions{Name: "PlanActivity"},
 	)
 	env.RegisterActivityWithOptions(
-		func(context.Context, apptemporal.DesignInput) (apptemporal.DesignOutput, error) { return apptemporal.DesignOutput{}, nil },
+		func(context.Context, apptemporal.DesignInput) (apptemporal.DesignOutput, error) {
+			return apptemporal.DesignOutput{}, nil
+		},
 		activity.RegisterOptions{Name: "DesignActivity"},
 	)
 	env.RegisterActivityWithOptions(
-		func(context.Context, apptemporal.CodeInput) (apptemporal.CodeOutput, error) { return apptemporal.CodeOutput{}, nil },
+		func(context.Context, apptemporal.CodeInput) (apptemporal.CodeOutput, error) {
+			return apptemporal.CodeOutput{}, nil
+		},
 		activity.RegisterOptions{Name: "CodeActivity"},
 	)
 	env.RegisterActivityWithOptions(
-		func(context.Context, apptemporal.QAInput) (apptemporal.QAOutput, error) { return apptemporal.QAOutput{}, nil },
+		func(context.Context, apptemporal.QAInput) (apptemporal.QAOutput, error) {
+			return apptemporal.QAOutput{}, nil
+		},
 		activity.RegisterOptions{Name: "QAActivity"},
 	)
 	env.RegisterActivityWithOptions(
@@ -96,21 +104,35 @@ func TestGenerateAppWorkflow_QARetryThenSucceeds(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := newTestEnv(&suite)
 
+	input := newInput()
+
 	env.OnActivity("PlanActivity", mock.Anything, mock.Anything).
 		Return(apptemporal.PlanOutput{}, nil)
+	// A non-zero Colors value is required to exercise the design-token
+	// refresh branch in GenerateAppWorkflow (a zero-value DesignOutput, as
+	// an unconfigured mock would otherwise return, is treated as "design
+	// didn't produce real tokens" and the refresh Code call is skipped).
 	env.OnActivity("DesignActivity", mock.Anything, mock.Anything).
-		Return(apptemporal.DesignOutput{}, nil)
+		Return(apptemporal.DesignOutput{
+			Tokens: apptemporal.DesignTokens{
+				Colors: apptemporal.ColorPalette{Primary: apptemporal.ColorVariant{Main: "#123456"}},
+			},
+		}, nil)
 
-	codeCalls := 0
+	var codeAttempts []int
+	var codeRunIDs []uuid.UUID
 	env.OnActivity("CodeActivity", mock.Anything, mock.Anything).
-		Run(func(mock.Arguments) { codeCalls++ }).
-		Return(apptemporal.CodeOutput{Files: map[string]string{"a.tsx": "x"}}, nil)
+		Return(func(_ context.Context, in apptemporal.CodeInput) (apptemporal.CodeOutput, error) {
+			codeAttempts = append(codeAttempts, in.Attempt)
+			codeRunIDs = append(codeRunIDs, in.RunID)
+			return apptemporal.CodeOutput{Files: map[string]string{"a.tsx": "x"}}, nil
+		})
 
-	qaCalls := 0
+	var qaAttempts []int
 	env.OnActivity("QAActivity", mock.Anything, mock.Anything).
 		Return(func(_ context.Context, in apptemporal.QAInput) (apptemporal.QAOutput, error) {
-			qaCalls++
-			if qaCalls == 1 {
+			qaAttempts = append(qaAttempts, in.Attempt)
+			if len(qaAttempts) == 1 {
 				return apptemporal.QAOutput{Passed: false, Issues: []apptemporal.QAIssue{{Message: "broken link"}}}, nil
 			}
 			return apptemporal.QAOutput{Passed: true}, nil
@@ -119,7 +141,7 @@ func TestGenerateAppWorkflow_QARetryThenSucceeds(t *testing.T) {
 	env.OnActivity("PersistRunResultActivity", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 		Return(nil)
 
-	env.ExecuteWorkflow(apptemporal.GenerateAppWorkflow, newInput())
+	env.ExecuteWorkflow(apptemporal.GenerateAppWorkflow, input)
 
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())
@@ -127,10 +149,15 @@ func TestGenerateAppWorkflow_QARetryThenSucceeds(t *testing.T) {
 	var result apptemporal.GenerateAppResult
 	require.NoError(t, env.GetWorkflowResult(&result))
 	require.Equal(t, "succeeded", result.Status)
-	require.Equal(t, 2, qaCalls, "QA should run twice: fail then pass")
+	require.Equal(t, []int{1, 2}, qaAttempts, "QA attempt numbers should be 1, then 2 on retry")
 	// Code runs: once initially (parallel with Design), once more after the
-	// design-tokens re-run, once more for the QA retry = 3.
-	require.GreaterOrEqual(t, codeCalls, 2, "Code should be re-run at least once after QA feedback")
+	// design-tokens re-run, once more for the QA retry — attempts 1, 2, 3,
+	// each distinct so the run-detail timeline can show every generation
+	// pass separately instead of collapsing them into one step.
+	require.Equal(t, []int{1, 2, 3}, codeAttempts, "each Code call should get a distinct, increasing attempt number")
+	for _, id := range codeRunIDs {
+		require.Equal(t, input.RunID, id, "every activity call must carry the run's RunID for step tracking")
+	}
 
 	env.AssertExpectations(t)
 }

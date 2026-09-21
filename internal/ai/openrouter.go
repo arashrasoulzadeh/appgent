@@ -25,7 +25,7 @@ func NewOpenRouterProvider(config ProviderConfig) *OpenRouterProvider {
 		apiKey:  config.APIKey,
 		baseURL: baseURL,
 		httpClient: &http.Client{
-			Timeout: 120 * time.Second,
+			Timeout: 240 * time.Second,
 		},
 	}
 }

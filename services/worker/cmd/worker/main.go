@@ -43,6 +43,10 @@ func main() {
 		MaxConcurrentActivityExecutionSize: 10,
 	})
 
+	// Give the activity functions DB access for progress tracking
+	// (agent_steps rows) — see internal/agents/tracking.go.
+	agents.SetDBPool(pool)
+
 	// Register workflow and activities. Activities are registered under
 	// explicit names matching what GenerateAppWorkflow references by
 	// string (internal/temporal/workflow.go) — the real implementations

@@ -13,12 +13,16 @@ func DesignActivity(ctx context.Context, in temporal.DesignInput) (temporal.Desi
 	}
 
 	model := modelOrDefault(getModelForAgent("design"), provider)
+	stepID := startStep(ctx, in.RunID, "design", 1, model, in)
 
 	ragSvc := getRAGService(ctx)
 	agent, err := NewDesignAgent(provider, model, ragSvc)
 	if err != nil {
+		finishStep(ctx, stepID, nil, err)
 		return temporal.DesignOutput{}, err
 	}
 
-	return agent.Execute(ctx, in)
+	out, err := agent.Execute(ctx, in)
+	finishStep(ctx, stepID, out, err)
+	return out, err
 }

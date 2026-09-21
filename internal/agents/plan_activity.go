@@ -13,12 +13,16 @@ func PlanActivity(ctx context.Context, in temporal.PlanInput) (temporal.PlanOutp
 	}
 
 	model := modelOrDefault(getModelForAgent("plan"), provider)
+	stepID := startStep(ctx, in.RunID, "plan", 1, model, in)
 
 	ragSvc := getRAGService(ctx)
 	agent, err := NewPlanAgent(provider, model, ragSvc)
 	if err != nil {
+		finishStep(ctx, stepID, nil, err)
 		return temporal.PlanOutput{}, err
 	}
 
-	return agent.Execute(ctx, in)
+	out, err := agent.Execute(ctx, in)
+	finishStep(ctx, stepID, out, err)
+	return out, err
 }

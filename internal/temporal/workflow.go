@@ -21,6 +21,7 @@ type GenerateAppResult struct {
 }
 
 type PlanInput struct {
+	RunID      uuid.UUID
 	AppKind    string
 	UserPrompt string
 	RAGContext []DesignPattern
@@ -63,20 +64,21 @@ type DesignPattern struct {
 }
 
 type DesignInput struct {
-	Spec PlanOutput
+	RunID uuid.UUID
+	Spec  PlanOutput
 }
 
 type DesignOutput struct {
-	Tokens     DesignTokens
-	CopyTone   string
+	Tokens      DesignTokens
+	CopyTone    string
 	LayoutNotes string
 }
 
 type DesignTokens struct {
-	Colors        ColorPalette
-	Spacing       []string
-	Typography    Typography
-	BorderRadius  []string
+	Colors       ColorPalette
+	Spacing      []string
+	Typography   Typography
+	BorderRadius []string
 }
 
 type ColorPalette struct {
@@ -90,25 +92,27 @@ type ColorPalette struct {
 }
 
 type ColorVariant struct {
-	Light  string
-	Main   string
-	Dark   string
+	Light    string
+	Main     string
+	Dark     string
 	Contrast string
 }
 
 type Typography struct {
-	FontFamily string
-	FontSizes  map[string]string
+	FontFamily  string
+	FontSizes   map[string]string
 	FontWeights map[string]int
 	LineHeights map[string]string
 }
 
 type CodeInput struct {
-	Spec          PlanOutput
-	DesignTokens  *DesignTokens
-	PriorFiles    map[string]string
-	QAFeedback    []QAIssue
-	AppKind       string
+	RunID        uuid.UUID
+	Attempt      int
+	Spec         PlanOutput
+	DesignTokens *DesignTokens
+	PriorFiles   map[string]string
+	QAFeedback   []QAIssue
+	AppKind      string
 }
 
 type CodeOutput struct {
@@ -116,6 +120,8 @@ type CodeOutput struct {
 }
 
 type QAInput struct {
+	RunID   uuid.UUID
+	Attempt int
 	Files   map[string]string
 	Spec    PlanOutput
 	AppKind string
@@ -127,10 +133,10 @@ type QAOutput struct {
 }
 
 type QAIssue struct {
-	File      string
-	Line      int
-	Severity  string
-	Message   string
+	File     string
+	Line     int
+	Severity string
+	Message  string
 }
 
 const (
@@ -155,6 +161,22 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 	}
 	ctx = workflow.WithActivityOptions(ctx, ao)
 
+	// CodeActivity generates a full file tree per call and is the slowest
+	// step by far — give it its own longer timeout rather than sharing the
+	// 5-minute default with the lighter Plan/Design/QA activities.
+	codeCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		StartToCloseTimeout: 10 * time.Minute,
+		RetryPolicy: &temporal.RetryPolicy{
+			MaximumAttempts: 3,
+			InitialInterval: 5 * time.Second,
+		},
+	})
+	codeAttempt := 0
+	nextCodeAttempt := func() int {
+		codeAttempt++
+		return codeAttempt
+	}
+
 	// Persist whatever the final result ends up being, on every exit path
 	// (success, needs_review, or failure) — this is what keeps
 	// generation_runs.status / apps.status in sync with what actually
@@ -172,6 +194,7 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 
 	var planOutput PlanOutput
 	planErr := workflow.ExecuteActivity(ctx, planActivityName, PlanInput{
+		RunID:      in.RunID,
 		AppKind:    in.AppKind,
 		UserPrompt: in.UserPrompt,
 		RAGContext: []DesignPattern{},
@@ -182,8 +205,10 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 	}
 
 	// Design and Code run in parallel (as Futures)
-	designFuture := workflow.ExecuteActivity(ctx, designActivityName, DesignInput{Spec: planOutput})
-	codeFuture := workflow.ExecuteActivity(ctx, codeActivityName, CodeInput{
+	designFuture := workflow.ExecuteActivity(ctx, designActivityName, DesignInput{RunID: in.RunID, Spec: planOutput})
+	codeFuture := workflow.ExecuteActivity(codeCtx, codeActivityName, CodeInput{
+		RunID:        in.RunID,
+		Attempt:      nextCodeAttempt(),
 		Spec:         planOutput,
 		DesignTokens: nil,
 		PriorFiles:   nil,
@@ -206,7 +231,9 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 	// If design finished, re-run Code with design tokens
 	if designOutput.Tokens.Colors != (ColorPalette{}) {
 		var updatedCodeOutput CodeOutput
-		execErr := workflow.ExecuteActivity(ctx, codeActivityName, CodeInput{
+		execErr := workflow.ExecuteActivity(codeCtx, codeActivityName, CodeInput{
+			RunID:        in.RunID,
+			Attempt:      nextCodeAttempt(),
 			Spec:         planOutput,
 			DesignTokens: &designOutput.Tokens,
 			PriorFiles:   codeOutput.Files,
@@ -225,6 +252,8 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 	for attempt := 1; attempt <= maxQARetries; attempt++ {
 		var qaOutput QAOutput
 		qaErr := workflow.ExecuteActivity(ctx, qaActivityName, QAInput{
+			RunID:   in.RunID,
+			Attempt: attempt,
 			Files:   codeOutput.Files,
 			Spec:    planOutput,
 			AppKind: in.AppKind,
@@ -246,7 +275,9 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 
 		// Re-run Code with QA feedback
 		var updatedCodeOutput CodeOutput
-		retryErr := workflow.ExecuteActivity(ctx, codeActivityName, CodeInput{
+		retryErr := workflow.ExecuteActivity(codeCtx, codeActivityName, CodeInput{
+			RunID:        in.RunID,
+			Attempt:      nextCodeAttempt(),
 			Spec:         planOutput,
 			DesignTokens: &designOutput.Tokens,
 			PriorFiles:   codeOutput.Files,

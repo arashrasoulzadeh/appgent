@@ -13,12 +13,16 @@ func CodeActivity(ctx context.Context, in temporal.CodeInput) (temporal.CodeOutp
 	}
 
 	model := modelOrDefault(getModelForAgent("code"), provider)
+	stepID := startStep(ctx, in.RunID, "code", in.Attempt, model, in)
 
 	ragSvc := getRAGService(ctx)
 	agent, err := NewCodeAgent(provider, model, ragSvc)
 	if err != nil {
+		finishStep(ctx, stepID, nil, err)
 		return temporal.CodeOutput{}, err
 	}
 
-	return agent.Execute(ctx, in)
+	out, err := agent.Execute(ctx, in)
+	finishStep(ctx, stepID, out, err)
+	return out, err
 }
