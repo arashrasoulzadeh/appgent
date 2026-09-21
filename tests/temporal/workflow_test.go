@@ -761,3 +761,69 @@ func TestRedeployWorkflow_BuildFailure_MarksDeploymentFailed(t *testing.T) {
 	env.AssertNotCalled(t, "PromoteDeploymentActivity", mock.Anything, mock.Anything)
 	env.AssertExpectations(t)
 }
+
+// TestGenerateAppWorkflow_MissingComponentImport_SelfHeals is a regression
+// test for a real production build failure: a page imported
+// "@/components/GhostThing", a name that was never in the Plan spec's
+// component list and so was never generated as its own target — this is
+// a guaranteed "Module not found" build failure no matter how many times
+// the SAME already-succeeded target gets retried (failure isolation in
+// generateCode doesn't apply here; nothing ever failed). The workflow
+// must catch this with a zero-token static check (never calling the real
+// QAActivity while the bad import is still present) and self-heal via the
+// existing retry-with-feedback loop, rather than requiring a full,
+// separately-triggered regenerate.
+func TestGenerateAppWorkflow_MissingComponentImport_SelfHeals(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := newTestEnv(&suite)
+
+	env.OnActivity("PlanActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.PlanOutput{Pages: []apptemporal.PageSpec{{Name: "Home", Path: "/"}}}, nil)
+	// No design tokens set (zero-value ColorPalette), so the design-
+	// refresh branch in GenerateAppWorkflow is skipped and CodeInput.Attempt
+	// maps 1:1 to real generateCode invocations, keeping this test simple.
+	env.OnActivity("DesignActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.DesignOutput{}, nil)
+
+	env.OnActivity("CodeActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.CodeInput) (apptemporal.CodeOutput, error) {
+			key := "shared"
+			if in.TargetPage != nil {
+				key = in.TargetPage.Name
+			}
+			content := "export default function X() { return null }"
+			if in.TargetPage != nil && in.TargetPage.Name == "Home" && in.Attempt == 1 {
+				// Invents a component that was never in the Plan's
+				// component list — nothing will ever generate it.
+				content = `import GhostThing from "@/components/GhostThing"`
+			}
+			return apptemporal.CodeOutput{Files: map[string]string{key + ".tsx": content}}, nil
+		})
+
+	var qaCalls int
+	env.OnActivity("QAActivity", mock.Anything, mock.Anything).
+		Return(func(context.Context, apptemporal.QAInput) (apptemporal.QAOutput, error) {
+			qaCalls++
+			return apptemporal.QAOutput{Passed: true}, nil
+		})
+
+	env.OnActivity("PersistRunResultActivity", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(nil)
+
+	env.ExecuteWorkflow(apptemporal.GenerateAppWorkflow, newInput())
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	var result apptemporal.GenerateAppResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, "succeeded", result.Status, "must self-heal within the existing retry budget, not require a separate regenerate")
+
+	// The real QA activity must be skipped entirely while the bad import
+	// is present (zero LLM tokens spent detecting it) — only called once,
+	// on the second attempt, after the retry regenerated Home without the
+	// bad import.
+	require.Equal(t, 1, qaCalls, "QAActivity must not be called while the structural check would already catch the failure")
+
+	env.AssertExpectations(t)
+}
