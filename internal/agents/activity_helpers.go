@@ -18,11 +18,15 @@ func getAIProvider() (ai.Provider, error) {
 
 func getModelForAgent(agentType string) string {
 	envKey := fmt.Sprintf("AI_MODEL_%s", strings.ToUpper(agentType))
-	model := os.Getenv(envKey)
-	if model != "" {
+	if model := os.Getenv(envKey); model != "" {
 		return model
 	}
-	return os.Getenv("AI_MODEL")
+	// Falls back to the active provider's own resolved model (e.g.
+	// GAPGPT_MODEL, OLLAMA_MODEL) rather than the bare AI_MODEL var — a
+	// stale AI_MODEL left over from a previous AI_PROVIDER must not
+	// override the current provider's model just because AI_MODEL_<AGENT>
+	// wasn't set for this agent.
+	return ai.ProviderConfigFromEnv().Model
 }
 
 // modelOrDefault returns model if non-empty, otherwise a sensible default

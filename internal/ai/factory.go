@@ -23,7 +23,14 @@ func NewProviderFromConfig(config ProviderConfig) (Provider, error) {
 	}
 }
 
-func NewProviderFromEnv() (Provider, error) {
+// ProviderConfigFromEnv resolves the active provider's config the same way
+// NewProviderFromEnv does, including provider-specific env vars taking
+// priority over the generic AI_* fallbacks. Exported so callers that need
+// just the resolved model (e.g. internal/agents.getModelForAgent's fallback
+// when AI_MODEL_<AGENT> is unset) use the same precedence instead of
+// re-reading AI_MODEL directly, which would ignore GAPGPT_MODEL/
+// OLLAMA_MODEL/etc. when AI_PROVIDER isn't "openrouter".
+func ProviderConfigFromEnv() ProviderConfig {
 	providerType := strings.ToLower(os.Getenv("AI_PROVIDER"))
 	if providerType == "" {
 		providerType = "openrouter"
@@ -31,64 +38,51 @@ func NewProviderFromEnv() (Provider, error) {
 
 	config := ProviderConfig{
 		Type:    providerType,
-		APIKey:  os.Getenv("AI_API_KEY"),
-		BaseURL: os.Getenv("AI_BASE_URL"),
-		Model:   os.Getenv("AI_MODEL"),
 		Options: map[string]string{},
 	}
 
-	// Provider-specific env vars
+	// Provider-specific env vars take priority over the generic AI_*
+	// fallbacks below — otherwise a leftover AI_MODEL from a previous
+	// provider setup (e.g. an OpenRouter free-tier model id) silently
+	// overrides GAPGPT_MODEL/OLLAMA_MODEL/etc. whenever it's still set,
+	// even though AI_PROVIDER was switched to a different provider.
 	switch providerType {
 	case "openrouter":
-		if config.APIKey == "" {
-			config.APIKey = os.Getenv("OPENROUTER_API_KEY")
-		}
-		if config.BaseURL == "" {
-			config.BaseURL = os.Getenv("OPENROUTER_BASE_URL")
-		}
-		if config.Model == "" {
-			config.Model = os.Getenv("OPENROUTER_MODEL_PLAN")
-		}
+		config.APIKey = os.Getenv("OPENROUTER_API_KEY")
+		config.BaseURL = os.Getenv("OPENROUTER_BASE_URL")
+		config.Model = os.Getenv("OPENROUTER_MODEL_PLAN")
 	case "openai":
-		if config.APIKey == "" {
-			config.APIKey = os.Getenv("OPENAI_API_KEY")
-		}
-		if config.BaseURL == "" {
-			config.BaseURL = os.Getenv("OPENAI_BASE_URL")
-		}
-		if config.Model == "" {
-			config.Model = os.Getenv("OPENAI_MODEL")
-		}
+		config.APIKey = os.Getenv("OPENAI_API_KEY")
+		config.BaseURL = os.Getenv("OPENAI_BASE_URL")
+		config.Model = os.Getenv("OPENAI_MODEL")
 	case "anthropic":
-		if config.APIKey == "" {
-			config.APIKey = os.Getenv("ANTHROPIC_API_KEY")
-		}
-		if config.BaseURL == "" {
-			config.BaseURL = os.Getenv("ANTHROPIC_BASE_URL")
-		}
-		if config.Model == "" {
-			config.Model = os.Getenv("ANTHROPIC_MODEL")
-		}
+		config.APIKey = os.Getenv("ANTHROPIC_API_KEY")
+		config.BaseURL = os.Getenv("ANTHROPIC_BASE_URL")
+		config.Model = os.Getenv("ANTHROPIC_MODEL")
 	case "ollama":
-		if config.BaseURL == "" {
-			config.BaseURL = os.Getenv("OLLAMA_BASE_URL")
-		}
-		if config.Model == "" {
-			config.Model = os.Getenv("OLLAMA_MODEL")
-		}
+		config.BaseURL = os.Getenv("OLLAMA_BASE_URL")
+		config.Model = os.Getenv("OLLAMA_MODEL")
 	case "gapgpt":
-		if config.APIKey == "" {
-			config.APIKey = os.Getenv("GAPGPT_API_KEY")
-		}
-		if config.BaseURL == "" {
-			config.BaseURL = os.Getenv("GAPGPT_BASE_URL")
-		}
-		if config.Model == "" {
-			config.Model = os.Getenv("GAPGPT_MODEL")
-		}
+		config.APIKey = os.Getenv("GAPGPT_API_KEY")
+		config.BaseURL = os.Getenv("GAPGPT_BASE_URL")
+		config.Model = os.Getenv("GAPGPT_MODEL")
 	}
 
-	return NewProviderFromConfig(config)
+	if config.APIKey == "" {
+		config.APIKey = os.Getenv("AI_API_KEY")
+	}
+	if config.BaseURL == "" {
+		config.BaseURL = os.Getenv("AI_BASE_URL")
+	}
+	if config.Model == "" {
+		config.Model = os.Getenv("AI_MODEL")
+	}
+
+	return config
+}
+
+func NewProviderFromEnv() (Provider, error) {
+	return NewProviderFromConfig(ProviderConfigFromEnv())
 }
 
 func GetDefaultModelForProvider(providerType string) string {

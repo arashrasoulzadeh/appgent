@@ -31,6 +31,49 @@ func TestGetDefaultModelForProvider(t *testing.T) {
 	}
 }
 
+// TestNewProviderFromEnv_ProviderSpecificModelWinsOverStaleGenericAIModel is
+// a regression test: a leftover generic AI_MODEL (e.g. from a previous
+// AI_PROVIDER=openrouter setup) must NOT silently override a different
+// provider's own _MODEL var once AI_PROVIDER is switched — that caused
+// requests meant for GAPGPT_MODEL to go out using a stale OpenRouter
+// free-tier model id instead.
+func TestNewProviderFromEnv_ProviderSpecificModelWinsOverStaleGenericAIModel(t *testing.T) {
+	var captured map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"1","choices":[{"index":0,"message":{"role":"assistant","content":"hi"}}]}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv("AI_PROVIDER", "gapgpt")
+	t.Setenv("AI_MODEL", "nvidia/nemotron-3-ultra-550b-a55b:free") // stale leftover
+	t.Setenv("GAPGPT_MODEL", "gpt-4o-mini")
+	t.Setenv("GAPGPT_API_KEY", "gapgpt-key")
+	t.Setenv("GAPGPT_BASE_URL", srv.URL)
+
+	provider, err := ai.NewProviderFromEnv()
+	if err != nil {
+		t.Fatalf("NewProviderFromEnv() error = %v", err)
+	}
+	if provider.Name() != "gapgpt" {
+		t.Fatalf("provider.Name() = %q, want %q", provider.Name(), "gapgpt")
+	}
+
+	_, err = provider.ChatCompletion(context.Background(), ai.ChatCompletionRequest{
+		Model:    "gpt-4o-mini",
+		Messages: []ai.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion() error = %v", err)
+	}
+	if got := captured["model"]; got != "gpt-4o-mini" {
+		t.Errorf("request model = %v, want %q (must not be clobbered by stale AI_MODEL)", got, "gpt-4o-mini")
+	}
+}
+
 func TestNewProviderFromConfig(t *testing.T) {
 	cases := []struct {
 		name     string
