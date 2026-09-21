@@ -1,6 +1,6 @@
 # Agent Prompt Specs
 
-All four agents call OpenRouter using model `nvidia/nemotron-3-ultra:free`
+All four agents call OpenRouter using model `nvidia/nemotron-3-ultra-550b-a55b:free`
 (configurable via `OPENROUTER_MODEL_*` env vars per agent — see
 [environment.md](environment.md) — so any agent can be swapped to a stronger
 paid model later without a code change). All calls request structured JSON

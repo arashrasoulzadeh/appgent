@@ -82,7 +82,7 @@ func NewProviderFromEnv() (Provider, error) {
 func GetDefaultModelForProvider(providerType string) string {
 	switch strings.ToLower(providerType) {
 	case "openrouter":
-		return "nvidia/nemotron-3-ultra:free"
+		return "nvidia/nemotron-3-ultra-550b-a55b:free"
 	case "openai":
 		return "gpt-4o-mini"
 	case "anthropic":
@@ -90,6 +90,6 @@ func GetDefaultModelForProvider(providerType string) string {
 	case "ollama":
 		return "llama3.1:8b"
 	default:
-		return "nvidia/nemotron-3-ultra:free"
+		return "nvidia/nemotron-3-ultra-550b-a55b:free"
 	}
 }

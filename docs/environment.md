@@ -63,10 +63,10 @@ Compose service name as host, unaffected by any of this.
 |---|---|---|
 | `OPENROUTER_API_KEY` | `sk-or-...` | required |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | |
-| `OPENROUTER_MODEL_PLAN` | `nvidia/nemotron-3-ultra:free` | |
-| `OPENROUTER_MODEL_DESIGN` | `nvidia/nemotron-3-ultra:free` | |
-| `OPENROUTER_MODEL_CODE` | `nvidia/nemotron-3-ultra:free` | |
-| `OPENROUTER_MODEL_QA` | `nvidia/nemotron-3-ultra:free` | |
+| `OPENROUTER_MODEL_PLAN` | `nvidia/nemotron-3-ultra-550b-a55b:free` | |
+| `OPENROUTER_MODEL_DESIGN` | `nvidia/nemotron-3-ultra-550b-a55b:free` | |
+| `OPENROUTER_MODEL_CODE` | `nvidia/nemotron-3-ultra-550b-a55b:free` | |
+| `OPENROUTER_MODEL_QA` | `nvidia/nemotron-3-ultra-550b-a55b:free` | |
 | `MAX_QA_RETRIES` | `3` | |
 | `WORKER_MAX_CONCURRENT_ACTIVITIES` | `10` | |
 

@@ -36,7 +36,7 @@ func (p *OpenRouterProvider) Name() string {
 
 func (p *OpenRouterProvider) AvailableModels() []string {
 	return []string{
-		"nvidia/nemotron-3-ultra:free",
+		"nvidia/nemotron-3-ultra-550b-a55b:free",
 		"anthropic/claude-3.5-sonnet",
 		"anthropic/claude-3.5-haiku",
 		"openai/gpt-4o",

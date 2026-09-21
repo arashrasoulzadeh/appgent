@@ -17,12 +17,12 @@ func TestGetDefaultModelForProvider(t *testing.T) {
 		providerType string
 		want         string
 	}{
-		{"openrouter", "nvidia/nemotron-3-ultra:free"},
-		{"OpenRouter", "nvidia/nemotron-3-ultra:free"}, // case-insensitive
+		{"openrouter", "nvidia/nemotron-3-ultra-550b-a55b:free"},
+		{"OpenRouter", "nvidia/nemotron-3-ultra-550b-a55b:free"}, // case-insensitive
 		{"openai", "gpt-4o-mini"},
 		{"anthropic", "claude-3-5-haiku-20241022"},
 		{"ollama", "llama3.1:8b"},
-		{"unknown-provider", "nvidia/nemotron-3-ultra:free"},
+		{"unknown-provider", "nvidia/nemotron-3-ultra-550b-a55b:free"},
 	}
 	for _, tc := range cases {
 		if got := ai.GetDefaultModelForProvider(tc.providerType); got != tc.want {

@@ -100,11 +100,11 @@ run-api:
 	ADMIN_SEED_PASSWORD="admin" \
 	OPENROUTER_API_KEY="sk-or-test" \
 	OPENROUTER_BASE_URL="https://openrouter.ai/api/v1" \
-	OPENROUTER_MODEL_PLAN="nvidia/nemotron-3-ultra:free" \
-	OPENROUTER_MODEL_DESIGN="nvidia/nemotron-3-ultra:free" \
-	OPENROUTER_MODEL_CODE="nvidia/nemotron-3-ultra:free" \
-	OPENROUTER_MODEL_QA="nvidia/nemotron-3-ultra:free" \
-	OPENROUTER_MODEL_EMBEDDING="nvidia/nemotron-3-ultra:free" \
+	OPENROUTER_MODEL_PLAN="nvidia/nemotron-3-ultra-550b-a55b:free" \
+	OPENROUTER_MODEL_DESIGN="nvidia/nemotron-3-ultra-550b-a55b:free" \
+	OPENROUTER_MODEL_CODE="nvidia/nemotron-3-ultra-550b-a55b:free" \
+	OPENROUTER_MODEL_QA="nvidia/nemotron-3-ultra-550b-a55b:free" \
+	OPENROUTER_MODEL_EMBEDDING="nvidia/nemotron-3-ultra-550b-a55b:free" \
 	MAX_QA_RETRIES="3" \
 	WORKER_MAX_CONCURRENT_ACTIVITIES="10" \
 	LOG_LEVEL="info" \
@@ -120,11 +120,11 @@ run-worker:
 	OBJECT_STORAGE_SECRET_KEY="minioadmin" \
 	OPENROUTER_API_KEY="sk-or-test" \
 	OPENROUTER_BASE_URL="https://openrouter.ai/api/v1" \
-	OPENROUTER_MODEL_PLAN="nvidia/nemotron-3-ultra:free" \
-	OPENROUTER_MODEL_DESIGN="nvidia/nemotron-3-ultra:free" \
-	OPENROUTER_MODEL_CODE="nvidia/nemotron-3-ultra:free" \
-	OPENROUTER_MODEL_QA="nvidia/nemotron-3-ultra:free" \
-	OPENROUTER_MODEL_EMBEDDING="nvidia/nemotron-3-ultra:free" \
+	OPENROUTER_MODEL_PLAN="nvidia/nemotron-3-ultra-550b-a55b:free" \
+	OPENROUTER_MODEL_DESIGN="nvidia/nemotron-3-ultra-550b-a55b:free" \
+	OPENROUTER_MODEL_CODE="nvidia/nemotron-3-ultra-550b-a55b:free" \
+	OPENROUTER_MODEL_QA="nvidia/nemotron-3-ultra-550b-a55b:free" \
+	OPENROUTER_MODEL_EMBEDDING="nvidia/nemotron-3-ultra-550b-a55b:free" \
 	MAX_QA_RETRIES="3" \
 	WORKER_MAX_CONCURRENT_ACTIVITIES="10" \
 	LOG_LEVEL="info" \
@@ -147,7 +147,7 @@ seed-patterns:
 	POSTGRES_DSN="postgres://appgent:appgent@localhost:5433/appgent?sslmode=disable" \
 	OPENROUTER_API_KEY="sk-or-test" \
 	OPENROUTER_BASE_URL="https://openrouter.ai/api/v1" \
-	OPENROUTER_MODEL_EMBEDDING="nvidia/nemotron-3-ultra:free" \
+	OPENROUTER_MODEL_EMBEDDING="nvidia/nemotron-3-ultra-550b-a55b:free" \
 	$(GO) run ./cmd/seed-patterns
 
 # Cleanup

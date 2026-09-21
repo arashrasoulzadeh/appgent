@@ -92,7 +92,7 @@ Full run detail including every agent step, for the timeline UI.
 ```json
 { "run": { "id": "uuid", "version": 3, "status": "ready", "error": null },
   "steps": [
-    { "agent_type": "plan", "attempt": 1, "status": "succeeded", "model_used": "nvidia/nemotron-3-ultra:free",
+    { "agent_type": "plan", "attempt": 1, "status": "succeeded", "model_used": "nvidia/nemotron-3-ultra-550b-a55b:free",
       "started_at": "...", "finished_at": "...", "output_summary": "5 pages, 12 components planned" },
     { "agent_type": "design", "attempt": 1, "status": "succeeded", "...": "..." },
     { "agent_type": "code", "attempt": 1, "status": "succeeded", "...": "..." },

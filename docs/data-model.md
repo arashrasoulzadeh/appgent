@@ -68,7 +68,7 @@ CREATE TABLE agent_steps (
     attempt      int NOT NULL DEFAULT 1,     -- QA retry loop increments this per agent_type
     input        jsonb NOT NULL,             -- prompt context sent to the model
     output       jsonb,                      -- structured agent output (spec/tokens/files/qa report)
-    model_used   text NOT NULL,              -- OpenRouter model id, e.g. "nvidia/nemotron-3-ultra:free"
+    model_used   text NOT NULL,              -- OpenRouter model id, e.g. "nvidia/nemotron-3-ultra-550b-a55b:free"
     tokens_used  int,
     status       agent_step_status NOT NULL DEFAULT 'pending',
     error        text,

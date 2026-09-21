@@ -24,11 +24,11 @@ env:
   ADMIN_SEED_PASSWORD: admin
   OPENROUTER_API_KEY: sk-or-test
   OPENROUTER_BASE_URL: https://openrouter.ai/api/v1
-  OPENROUTER_MODEL_PLAN: nvidia/nemotron-3-ultra:free
-  OPENROUTER_MODEL_DESIGN: nvidia/nemotron-3-ultra:free
-  OPENROUTER_MODEL_CODE: nvidia/nemotron-3-ultra:free
-  OPENROUTER_MODEL_QA: nvidia/nemotron-3-ultra:free
-  OPENROUTER_MODEL_EMBEDDING: nvidia/nemotron-3-ultra:free
+  OPENROUTER_MODEL_PLAN: nvidia/nemotron-3-ultra-550b-a55b:free
+  OPENROUTER_MODEL_DESIGN: nvidia/nemotron-3-ultra-550b-a55b:free
+  OPENROUTER_MODEL_CODE: nvidia/nemotron-3-ultra-550b-a55b:free
+  OPENROUTER_MODEL_QA: nvidia/nemotron-3-ultra-550b-a55b:free
+  OPENROUTER_MODEL_EMBEDDING: nvidia/nemotron-3-ultra-550b-a55b:free
   MAX_QA_RETRIES: 3
   WORKER_MAX_CONCURRENT_ACTIVITIES: 10
   NEXT_PUBLIC_API_BASE_URL: http://localhost:8080/api/v1
@@ -221,11 +221,11 @@ jobs:
           OBJECT_STORAGE_SECRET_KEY: minioadmin
           OPENROUTER_API_KEY: sk-or-test
           OPENROUTER_BASE_URL: https://openrouter.ai/api/v1
-          OPENROUTER_MODEL_PLAN: nvidia/nemotron-3-ultra:free
-          OPENROUTER_MODEL_DESIGN: nvidia/nemotron-3-ultra:free
-          OPENROUTER_MODEL_CODE: nvidia/nemotron-3-ultra:free
-          OPENROUTER_MODEL_QA: nvidia/nemotron-3-ultra:free
-          OPENROUTER_MODEL_EMBEDDING: nvidia/nemotron-3-ultra:free
+          OPENROUTER_MODEL_PLAN: nvidia/nemotron-3-ultra-550b-a55b:free
+          OPENROUTER_MODEL_DESIGN: nvidia/nemotron-3-ultra-550b-a55b:free
+          OPENROUTER_MODEL_CODE: nvidia/nemotron-3-ultra-550b-a55b:free
+          OPENROUTER_MODEL_QA: nvidia/nemotron-3-ultra-550b-a55b:free
+          OPENROUTER_MODEL_EMBEDDING: nvidia/nemotron-3-ultra-550b-a55b:free
       - uses: pnpm/action-setup@v4
         with:
           version: 9.11.0

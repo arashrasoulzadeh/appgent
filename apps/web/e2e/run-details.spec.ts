@@ -29,7 +29,7 @@ test.describe('Run Details', () => {
   test('should expand agent step accordion', async ({ page }) => {
     await page.click('text=Plan')
     await expect(page.locator('text=Attempt 1')).toBeVisible()
-    await expect(page.locator('text=nvidia/nemotron-3-ultra:free')).toBeVisible()
+    await expect(page.locator('text=nvidia/nemotron-3-ultra-550b-a55b:free')).toBeVisible()
   })
 
   test('should navigate between tabs', async ({ page }) => {
