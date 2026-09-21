@@ -83,7 +83,6 @@ func (a *PlanAgent) Execute(ctx context.Context, in temporal.PlanInput) (tempora
 						"name":        map[string]string{"type": "string"},
 						"type":        map[string]string{"type": "string"},
 						"description": map[string]string{"type": "string"},
-						"props":       map[string]string{"type": "object"},
 					},
 					"required": []string{"name", "type", "description"},
 					"additionalProperties": false,
