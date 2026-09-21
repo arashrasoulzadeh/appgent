@@ -39,6 +39,9 @@ func (h *AppHandler) ListApps(w http.ResponseWriter, r *http.Request) {
 	if apps == nil {
 		apps = []*services.App{}
 	}
+	for _, a := range apps {
+		a.DeploymentURL.String = absoluteURL(r, a.DeploymentURL.String)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"apps": apps})

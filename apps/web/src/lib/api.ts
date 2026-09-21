@@ -152,6 +152,9 @@ export interface App {
   kind: 'website' | 'pwa'
   status: 'draft' | 'generating' | 'ready' | 'needs_review' | 'failed'
   created_at: string
+  // The app's most recent deployment, if it's ever had one.
+  deployment_status?: 'deploying' | 'live' | 'failed' | 'retired'
+  deployment_url?: string
 }
 
 export interface Run {

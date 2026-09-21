@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { api, App } from "@/lib/api"
 import { formatDate, getInitials, cn, apiErrorMessage } from "@/lib/utils"
-import { Plus, LayoutDashboard } from "lucide-react"
+import { Plus, LayoutDashboard, Rocket, Loader2 } from "lucide-react"
 import Link from "next/link"
 
 // Keep in sync with services.MaxAppsPerUser (internal/services/app_service.go).
@@ -43,15 +43,16 @@ export default function DashboardPage() {
     loadApps()
   }, [loadApps])
 
-  // Polls every 1s while any app is still generating, so status badges
-  // (generating -> ready/needs_review/failed) update on their own instead
-  // of requiring a manual reload. Stops once nothing's in progress.
-  const anyGenerating = apps.some((a) => a.status === "generating")
+  // Polls every 1s while any app is still generating or deploying, so
+  // status badges (generating -> ready/needs_review/failed, deploying ->
+  // live/failed) update on their own instead of requiring a manual
+  // reload. Stops once nothing's in progress.
+  const anyInProgress = apps.some((a) => a.status === "generating" || a.deployment_status === "deploying")
   useEffect(() => {
-    if (!anyGenerating) return
+    if (!anyInProgress) return
     const interval = setInterval(loadApps, 1000)
     return () => clearInterval(interval)
-  }, [anyGenerating, loadApps])
+  }, [anyInProgress, loadApps])
 
   const handleCreateApp = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -203,6 +204,21 @@ export default function DashboardPage() {
                   </span>
                   <span>{formatDate(app.created_at)}</span>
                 </div>
+                {app.deployment_status && (
+                  <div className="mt-2 flex items-center gap-1.5 text-xs">
+                    <span className={cn(
+                      "inline-flex items-center gap-1 px-2 py-0.5 rounded-full font-medium",
+                      app.deployment_status === "live" && "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300",
+                      app.deployment_status === "deploying" && "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300",
+                      app.deployment_status === "failed" && "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300",
+                      app.deployment_status === "retired" && "bg-neutral-100 text-neutral-800 dark:bg-neutral-800 dark:text-neutral-300",
+                    )}>
+                      <Rocket className="h-3 w-3" />
+                      {app.deployment_status === "deploying" && <Loader2 className="h-3 w-3 animate-spin" />}
+                      {app.deployment_status}
+                    </span>
+                  </div>
+                )}
               </Link>
             ))}
           </div>

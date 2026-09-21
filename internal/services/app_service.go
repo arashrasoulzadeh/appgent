@@ -71,6 +71,24 @@ type App struct {
 	Status    string    `json:"status"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+	// DeploymentStatus/DeploymentURL reflect the app's MOST RECENT
+	// deployment (if any) — surfaced on the apps list so its status is
+	// visible without opening the app's own detail page.
+	DeploymentStatus sql.NullString `json:"-"`
+	DeploymentURL    sql.NullString `json:"-"`
+}
+
+func (a *App) MarshalJSON() ([]byte, error) {
+	type alias App
+	return json.Marshal(struct {
+		*alias
+		DeploymentStatus string `json:"deployment_status,omitempty"`
+		DeploymentURL    string `json:"deployment_url,omitempty"`
+	}{
+		alias:            (*alias)(a),
+		DeploymentStatus: a.DeploymentStatus.String,
+		DeploymentURL:    a.DeploymentURL.String,
+	})
 }
 
 type Run struct {
@@ -352,8 +370,14 @@ func (s *AppService) GetByID(ctx context.Context, userID, appID uuid.UUID) (*App
 
 func (s *AppService) List(ctx context.Context, userID uuid.UUID) ([]*App, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, user_id, name, slug, kind, status, created_at, updated_at
-		FROM apps WHERE user_id = $1 ORDER BY created_at DESC
+		SELECT a.id, a.user_id, a.name, a.slug, a.kind, a.status, a.created_at, a.updated_at,
+		       d.status, d.url
+		FROM apps a
+		LEFT JOIN LATERAL (
+			SELECT status, url FROM deployments
+			WHERE app_id = a.id ORDER BY created_at DESC LIMIT 1
+		) d ON true
+		WHERE a.user_id = $1 ORDER BY a.created_at DESC
 	`, userID)
 	if err != nil {
 		return nil, err
@@ -363,7 +387,10 @@ func (s *AppService) List(ctx context.Context, userID uuid.UUID) ([]*App, error)
 	var apps []*App
 	for rows.Next() {
 		app := &App{}
-		err := rows.Scan(&app.ID, &app.UserID, &app.Name, &app.Slug, &app.Kind, &app.Status, &app.CreatedAt, &app.UpdatedAt)
+		err := rows.Scan(
+			&app.ID, &app.UserID, &app.Name, &app.Slug, &app.Kind, &app.Status, &app.CreatedAt, &app.UpdatedAt,
+			&app.DeploymentStatus, &app.DeploymentURL,
+		)
 		if err != nil {
 			return nil, err
 		}
