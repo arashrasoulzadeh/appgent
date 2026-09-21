@@ -31,6 +31,11 @@ type GenerateAppResult struct {
 	// produced files, or publishing itself failed — which is logged but
 	// deliberately non-fatal to the run's own status).
 	BundlePath string
+	// SourcePath is the object-storage prefix the run's raw generated
+	// source was saved under, independent of whether the build itself
+	// succeeded — this is what lets Deploy retry a failed build later
+	// (RedeployWorkflow) without a full regenerate.
+	SourcePath string
 }
 
 // PublishBundleInput/Output are used by PublishBundleActivity, which
@@ -43,6 +48,65 @@ type PublishBundleInput struct {
 
 type PublishBundleOutput struct {
 	BundlePath string
+}
+
+// PublishSourceInput/Output are used by PublishSourceActivity, which
+// durably saves a run's raw generated source (before build) — separately
+// from PublishBundleActivity's built output — so a failed build can be
+// retried later (RedeployWorkflow) without a full regenerate.
+type PublishSourceInput struct {
+	RunID uuid.UUID
+	Files map[string]string
+}
+
+type PublishSourceOutput struct {
+	SourcePath string
+}
+
+// RedeployInput/Result drive RedeployWorkflow — triggered by the Deploy
+// button. NeedsBuild is decided by AppService.Deploy before starting the
+// workflow: false when the target run already has a built bundle (just
+// promote it, fast), true when only raw source was saved (a previous
+// build failed, or this is the first deploy attempt for that run) and the
+// build must be retried first, without a full regenerate.
+type RedeployInput struct {
+	AppID        uuid.UUID
+	RunID        uuid.UUID
+	DeploymentID uuid.UUID
+	NeedsBuild   bool
+}
+
+type RedeployResult struct {
+	Status string // "live" or "failed"
+	Error  string
+}
+
+type FetchRunSourceInput struct {
+	RunID uuid.UUID
+}
+
+type FetchRunSourceOutput struct {
+	Files map[string]string
+}
+
+type UpdateRunBundlePathInput struct {
+	RunID      uuid.UUID
+	BundlePath string
+}
+
+type PromoteDeploymentInput struct {
+	AppID        uuid.UUID
+	RunID        uuid.UUID
+	DeploymentID uuid.UUID
+}
+
+type PromoteDeploymentOutput struct {
+	URL string
+}
+
+type MarkDeploymentFailedInput struct {
+	DeploymentID uuid.UUID
+	Error        string
 }
 
 type PlanInput struct {
@@ -181,12 +245,18 @@ type QAIssue struct {
 }
 
 const (
-	planActivityName    = "PlanActivity"
-	designActivityName  = "DesignActivity"
-	codeActivityName    = "CodeActivity"
-	qaActivityName      = "QAActivity"
-	persistActivityName = "PersistRunResultActivity"
-	publishActivityName = "PublishBundleActivity"
+	planActivityName          = "PlanActivity"
+	designActivityName        = "DesignActivity"
+	codeActivityName          = "CodeActivity"
+	qaActivityName            = "QAActivity"
+	persistActivityName       = "PersistRunResultActivity"
+	publishActivityName       = "PublishBundleActivity"
+	publishSourceActivityName = "PublishSourceActivity"
+
+	fetchRunSourceActivityName       = "FetchRunSourceActivity"
+	updateRunBundlePathActivityName  = "UpdateRunBundlePathActivity"
+	promoteDeploymentActivityName    = "PromoteDeploymentActivity"
+	markDeploymentFailedActivityName = "MarkDeploymentFailedActivity"
 )
 
 // GenerateAppWorkflow orchestrates Plan -> (Design || Code) -> QA-retry-loop.
@@ -445,7 +515,23 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 	// unavailable for that run until it's regenerated.
 	finishWithBundle := func(status, errMsg string) (GenerateAppResult, error) {
 		bundlePath := ""
+		sourcePath := ""
 		if len(codeOutput.Files) > 0 {
+			// Source is saved FIRST and independently of the build, so it
+			// survives even when the build itself fails below — that's
+			// what lets Deploy retry the build later (RedeployWorkflow)
+			// without a full regenerate.
+			var srcOut PublishSourceOutput
+			srcErr := workflow.ExecuteActivity(publishCtx, publishSourceActivityName, PublishSourceInput{
+				RunID: in.RunID,
+				Files: codeOutput.Files,
+			}).Get(publishCtx, &srcOut)
+			if srcErr != nil {
+				workflow.GetLogger(ctx).Warn("publish source failed", "runID", in.RunID, "error", srcErr)
+			} else {
+				sourcePath = srcOut.SourcePath
+			}
+
 			var pubOut PublishBundleOutput
 			pubErr := workflow.ExecuteActivity(publishCtx, publishActivityName, PublishBundleInput{
 				RunID: in.RunID,
@@ -457,7 +543,7 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 				bundlePath = pubOut.BundlePath
 			}
 		}
-		result = GenerateAppResult{Status: status, Error: errMsg, BundlePath: bundlePath}
+		result = GenerateAppResult{Status: status, Error: errMsg, BundlePath: bundlePath, SourcePath: sourcePath}
 		return result, nil
 	}
 
@@ -511,4 +597,68 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 	}
 
 	return finishWithBundle("needs_review", "QA failed after max retries")
+}
+
+// RedeployWorkflow is what the Deploy button actually triggers — never a
+// full regenerate. When NeedsBuild is false (the target run already has a
+// built bundle from generation time), this is just a fast promote. When
+// true (a previous build failed, or this run was never built), it first
+// fetches the run's durably-saved raw source and retries the build, using
+// the SAME generated code rather than asking the LLM to produce it again.
+func RedeployWorkflow(ctx workflow.Context, in RedeployInput) (result RedeployResult, err error) {
+	ao := workflow.ActivityOptions{
+		StartToCloseTimeout: 15 * time.Minute,
+		RetryPolicy: &temporal.RetryPolicy{
+			MaximumAttempts: 2,
+			InitialInterval: 5 * time.Second,
+		},
+	}
+	ctx = workflow.WithActivityOptions(ctx, ao)
+
+	// Whatever the final outcome, the deployments row created up front by
+	// AppService.Deploy (status 'deploying') must never be left stuck —
+	// mark it failed on any error so the UI doesn't show "deploying"
+	// forever the way the original, unimplemented deploy stub did.
+	defer func() {
+		if err != nil {
+			failCtx, cancel := workflow.NewDisconnectedContext(ctx)
+			defer cancel()
+			failCtx = workflow.WithActivityOptions(failCtx, ao)
+			_ = workflow.ExecuteActivity(failCtx, markDeploymentFailedActivityName, MarkDeploymentFailedInput{
+				DeploymentID: in.DeploymentID,
+				Error:        err.Error(),
+			}).Get(failCtx, nil)
+			result = RedeployResult{Status: "failed", Error: err.Error()}
+		}
+	}()
+
+	if in.NeedsBuild {
+		var srcOut FetchRunSourceOutput
+		if err = workflow.ExecuteActivity(ctx, fetchRunSourceActivityName, FetchRunSourceInput{RunID: in.RunID}).Get(ctx, &srcOut); err != nil {
+			return result, err
+		}
+
+		var pubOut PublishBundleOutput
+		if err = workflow.ExecuteActivity(ctx, publishActivityName, PublishBundleInput{RunID: in.RunID, Files: srcOut.Files}).Get(ctx, &pubOut); err != nil {
+			return result, err
+		}
+
+		if err = workflow.ExecuteActivity(ctx, updateRunBundlePathActivityName, UpdateRunBundlePathInput{
+			RunID:      in.RunID,
+			BundlePath: pubOut.BundlePath,
+		}).Get(ctx, nil); err != nil {
+			return result, err
+		}
+	}
+
+	if err = workflow.ExecuteActivity(ctx, promoteDeploymentActivityName, PromoteDeploymentInput{
+		AppID:        in.AppID,
+		RunID:        in.RunID,
+		DeploymentID: in.DeploymentID,
+	}).Get(ctx, nil); err != nil {
+		return result, err
+	}
+
+	result = RedeployResult{Status: "live"}
+	return result, nil
 }

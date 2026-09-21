@@ -27,11 +27,7 @@ func newTestAppService(t *testing.T, pool *pgxpool.Pool) *services.AppService {
 		t.Skipf("Temporal not available: %v", err)
 	}
 	t.Cleanup(tc.Close)
-	// nil provisioner is fine for tests that never reach a real
-	// publish/deploy against object storage — Deploy's ownership check
-	// and its "no published run" check both happen before the
-	// provisioner would ever be touched.
-	return services.NewAppService(pool, tc, nil)
+	return services.NewAppService(pool, tc)
 }
 
 func TestAppService_Create_Integration(t *testing.T) {

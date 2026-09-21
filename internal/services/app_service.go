@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/arashrasoulzadeh/appgent/internal/sandbox"
 	apptemporal "github.com/arashrasoulzadeh/appgent/internal/temporal"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -210,14 +209,16 @@ type User struct {
 	PasswordHash string
 }
 
+// AppService no longer touches object storage directly — Deploy (below)
+// dispatches RedeployWorkflow, and the worker's own PersistActivities
+// (which does hold a sandbox.Provisioner) does the actual promote.
 type AppService struct {
-	pool        *pgxpool.Pool
-	temporal    temporalclient.Client
-	provisioner sandbox.Provisioner
+	pool     *pgxpool.Pool
+	temporal temporalclient.Client
 }
 
-func NewAppService(pool *pgxpool.Pool, temporal temporalclient.Client, provisioner sandbox.Provisioner) *AppService {
-	return &AppService{pool: pool, temporal: temporal, provisioner: provisioner}
+func NewAppService(pool *pgxpool.Pool, temporal temporalclient.Client) *AppService {
+	return &AppService{pool: pool, temporal: temporal}
 }
 
 var ErrUserNotFound = errors.New("user not found")
@@ -533,6 +534,15 @@ var ErrNothingToDeploy = errors.New("no published run to deploy")
 // it. Unlike the old stub, this never leaves a deployment stuck at
 // "deploying" — the copy is synchronous, so the row is only ever inserted
 // once it's already live.
+// Deploy is what the Deploy button triggers — never a full regenerate.
+// It finds the app's latest run with EITHER a built bundle or just raw
+// saved source (bundle_path OR source_path), creates a 'deploying'
+// deployment row, and dispatches RedeployWorkflow to actually promote it
+// (or, if the run's build previously failed and only source was saved,
+// rebuild from that source first). The row is returned immediately at
+// 'deploying' — the frontend's existing 1s polling picks up the eventual
+// 'live'/'failed' transition once the workflow finishes, rather than this
+// call blocking on however long a rebuild takes.
 func (s *AppService) Deploy(ctx context.Context, userID, appID uuid.UUID) (*Deployment, error) {
 	var owns bool
 	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM apps WHERE id = $1 AND user_id = $2)`, appID, userID).Scan(&owns); err != nil {
@@ -543,37 +553,48 @@ func (s *AppService) Deploy(ctx context.Context, userID, appID uuid.UUID) (*Depl
 	}
 
 	var runID uuid.UUID
+	var bundlePath sql.NullString
 	err := s.pool.QueryRow(ctx, `
-		SELECT id FROM generation_runs
-		WHERE app_id = $1 AND status IN ('succeeded', 'needs_review') AND bundle_path IS NOT NULL
+		SELECT id, bundle_path FROM generation_runs
+		WHERE app_id = $1 AND status IN ('succeeded', 'needs_review')
+		  AND (bundle_path IS NOT NULL OR source_path IS NOT NULL)
 		ORDER BY version DESC LIMIT 1
-	`, appID).Scan(&runID)
+	`, appID).Scan(&runID, &bundlePath)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNothingToDeploy
 	}
 	if err != nil {
 		return nil, err
 	}
-
-	if s.provisioner == nil {
-		return nil, fmt.Errorf("deployment provisioner not configured")
-	}
-	if err := s.provisioner.Promote(ctx, appID, runID); err != nil {
-		return nil, fmt.Errorf("promote bundle: %w", err)
-	}
+	needsBuild := !bundlePath.Valid
 
 	deployment := &Deployment{}
-	liveURL := fmt.Sprintf("/api/v1/apps/%s/live/index.html", appID.String())
 	err = s.pool.QueryRow(ctx, `
-		INSERT INTO deployments (app_id, run_id, url, status, deployed_at)
-		VALUES ($1, $2, $3, 'live', now())
+		INSERT INTO deployments (app_id, run_id, status)
+		VALUES ($1, $2, 'deploying')
 		RETURNING id, app_id, run_id, url, status, deployed_at, created_at
-	`, appID, runID, liveURL).Scan(
+	`, appID, runID).Scan(
 		&deployment.ID, &deployment.AppID, &deployment.RunID, &deployment.URL, &deployment.Status, &deployment.DeployedAt, &deployment.CreatedAt,
 	)
 	if err != nil {
 		return nil, err
 	}
+
+	workflowID := "redeploy-" + deployment.ID.String()
+	_, err = s.temporal.ExecuteWorkflow(ctx, temporalclient.StartWorkflowOptions{
+		ID:        workflowID,
+		TaskQueue: generationTaskQueue,
+	}, apptemporal.RedeployWorkflow, apptemporal.RedeployInput{
+		AppID:        appID,
+		RunID:        runID,
+		DeploymentID: deployment.ID,
+		NeedsBuild:   needsBuild,
+	})
+	if err != nil {
+		s.pool.Exec(ctx, `UPDATE deployments SET status = 'failed' WHERE id = $1`, deployment.ID)
+		return nil, fmt.Errorf("start redeploy workflow: %w", err)
+	}
+
 	return deployment, nil
 }
 

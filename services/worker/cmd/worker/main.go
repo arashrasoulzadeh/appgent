@@ -58,22 +58,29 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to object storage: %v", err)
 	}
-	agents.SetProvisioner(sandbox.NewStaticExportProvisioner(storageClient, cfg.ObjectStorageBucket))
+	provisioner := sandbox.NewStaticExportProvisioner(storageClient, cfg.ObjectStorageBucket)
+	agents.SetProvisioner(provisioner)
 	agents.SetBuilder(sandbox.NewBuilder())
 
-	// Register workflow and activities. Activities are registered under
-	// explicit names matching what GenerateAppWorkflow references by
-	// string (internal/temporal/workflow.go) — the real implementations
-	// live in internal/agents, not in the temporal package itself.
-	persistActivities := &agents.PersistActivities{Pool: pool}
+	// Register workflows and activities. Activities are registered under
+	// explicit names matching what the workflows reference by string
+	// (internal/temporal/workflow.go) — the real implementations live in
+	// internal/agents, not in the temporal package itself.
+	persistActivities := &agents.PersistActivities{Pool: pool, Provisioner: provisioner}
 
 	w.RegisterWorkflow(temporal.GenerateAppWorkflow)
+	w.RegisterWorkflow(temporal.RedeployWorkflow)
 	w.RegisterActivityWithOptions(agents.PlanActivity, activity.RegisterOptions{Name: "PlanActivity"})
 	w.RegisterActivityWithOptions(agents.DesignActivity, activity.RegisterOptions{Name: "DesignActivity"})
 	w.RegisterActivityWithOptions(agents.CodeActivity, activity.RegisterOptions{Name: "CodeActivity"})
 	w.RegisterActivityWithOptions(agents.QAActivity, activity.RegisterOptions{Name: "QAActivity"})
 	w.RegisterActivityWithOptions(persistActivities.PersistRunResult, activity.RegisterOptions{Name: "PersistRunResultActivity"})
 	w.RegisterActivityWithOptions(agents.PublishBundleActivity, activity.RegisterOptions{Name: "PublishBundleActivity"})
+	w.RegisterActivityWithOptions(agents.PublishSourceActivity, activity.RegisterOptions{Name: "PublishSourceActivity"})
+	w.RegisterActivityWithOptions(agents.FetchRunSourceActivity, activity.RegisterOptions{Name: "FetchRunSourceActivity"})
+	w.RegisterActivityWithOptions(persistActivities.UpdateRunBundlePath, activity.RegisterOptions{Name: "UpdateRunBundlePathActivity"})
+	w.RegisterActivityWithOptions(persistActivities.PromoteDeployment, activity.RegisterOptions{Name: "PromoteDeploymentActivity"})
+	w.RegisterActivityWithOptions(persistActivities.MarkDeploymentFailed, activity.RegisterOptions{Name: "MarkDeploymentFailedActivity"})
 
 	// Start worker
 	err = w.Start()

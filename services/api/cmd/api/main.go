@@ -15,7 +15,6 @@ import (
 	"github.com/arashrasoulzadeh/appgent/internal/handlers"
 	"github.com/arashrasoulzadeh/appgent/internal/logger"
 	"github.com/arashrasoulzadeh/appgent/internal/middleware"
-	"github.com/arashrasoulzadeh/appgent/internal/sandbox"
 	"github.com/arashrasoulzadeh/appgent/internal/services"
 	"github.com/arashrasoulzadeh/appgent/internal/storage"
 	temporalclient "go.temporal.io/sdk/client"
@@ -65,9 +64,7 @@ func main() {
 		log.Error("Failed to connect to object storage", "error", err)
 		os.Exit(1)
 	}
-	provisioner := sandbox.NewStaticExportProvisioner(storageClient, cfg.ObjectStorageBucket)
-
-	appService := services.NewAppService(pool, temporalClient, provisioner)
+	appService := services.NewAppService(pool, temporalClient)
 
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(tokenService, appService)

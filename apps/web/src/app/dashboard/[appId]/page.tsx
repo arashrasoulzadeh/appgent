@@ -183,12 +183,16 @@ export default function AppDetailPage() {
   }
 
   const handleDeploy = async () => {
-    if (!selectedRun || selectedRun.status !== "succeeded") return
+    if (!selectedRun || (selectedRun.status !== "succeeded" && selectedRun.status !== "needs_review")) return
     setDeploying(true)
     try {
       await api.deployApp(appId)
       loadDeployments()
-      toast({ title: "Deployed", description: "Your app is live — check the Deployments tab for the link" })
+      // Deploy dispatches a workflow rather than blocking on it — it
+      // rebuilds from the run's already-generated source if needed (no
+      // regenerate), then promotes. The Deployments tab polls every 1s
+      // and picks up the live/failed transition on its own.
+      toast({ title: "Deploying", description: "Redeploying your last generation — check the Deployments tab for progress" })
     } catch (err) {
       toast({ title: "Failed to deploy", description: apiErrorMessage(err, "Unknown error"), variant: "destructive" })
     } finally {
@@ -278,7 +282,7 @@ export default function AppDetailPage() {
                           <Eye className="h-3 w-3" /> View Preview
                         </a>
                       )}
-                      {selectedRun.status === "succeeded" && (
+                      {(selectedRun.status === "succeeded" || selectedRun.status === "needs_review") && (
                         <Button
                           onClick={handleDeploy}
                           disabled={deploying}
@@ -409,7 +413,7 @@ export default function AppDetailPage() {
                   <Rocket className="h-12 w-12 mx-auto text-neutral-300 dark:text-neutral-700 mb-4" />
                   <h4 className="text-lg font-medium text-neutral-900 dark:text-white mb-2">No deployments yet</h4>
                   <p className="text-neutral-600 dark:text-neutral-400 mb-6">Deploy a successful run to make it live</p>
-                  {selectedRun?.status === "succeeded" && (
+                  {(selectedRun?.status === "succeeded" || selectedRun?.status === "needs_review") && (
                     <Button onClick={handleDeploy} disabled={deploying}>
                       <Rocket className="h-4 w-4 mr-2" /> Deploy Latest Run
                     </Button>

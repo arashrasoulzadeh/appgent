@@ -65,6 +65,32 @@ func newTestEnv(suite *testsuite.WorkflowTestSuite) *testsuite.TestWorkflowEnvir
 		},
 		activity.RegisterOptions{Name: "PublishBundleActivity"},
 	)
+	env.RegisterActivityWithOptions(
+		func(context.Context, apptemporal.PublishSourceInput) (apptemporal.PublishSourceOutput, error) {
+			return apptemporal.PublishSourceOutput{}, nil
+		},
+		activity.RegisterOptions{Name: "PublishSourceActivity"},
+	)
+	env.RegisterActivityWithOptions(
+		func(context.Context, apptemporal.FetchRunSourceInput) (apptemporal.FetchRunSourceOutput, error) {
+			return apptemporal.FetchRunSourceOutput{}, nil
+		},
+		activity.RegisterOptions{Name: "FetchRunSourceActivity"},
+	)
+	env.RegisterActivityWithOptions(
+		func(context.Context, apptemporal.UpdateRunBundlePathInput) error { return nil },
+		activity.RegisterOptions{Name: "UpdateRunBundlePathActivity"},
+	)
+	env.RegisterActivityWithOptions(
+		func(context.Context, apptemporal.PromoteDeploymentInput) (apptemporal.PromoteDeploymentOutput, error) {
+			return apptemporal.PromoteDeploymentOutput{}, nil
+		},
+		activity.RegisterOptions{Name: "PromoteDeploymentActivity"},
+	)
+	env.RegisterActivityWithOptions(
+		func(context.Context, apptemporal.MarkDeploymentFailedInput) error { return nil },
+		activity.RegisterOptions{Name: "MarkDeploymentFailedActivity"},
+	)
 	return env
 }
 
@@ -618,5 +644,120 @@ func TestGenerateAppWorkflow_ComponentFailureIsFatal(t *testing.T) {
 	require.Error(t, env.GetWorkflowError())
 	require.Equal(t, "failed", persistedStatus, "a persistently failing component must fail the run, not silently ship without it")
 
+	env.AssertExpectations(t)
+}
+
+func newRedeployInput(needsBuild bool) apptemporal.RedeployInput {
+	return apptemporal.RedeployInput{
+		AppID:        uuid.New(),
+		RunID:        uuid.New(),
+		DeploymentID: uuid.New(),
+		NeedsBuild:   needsBuild,
+	}
+}
+
+// TestRedeployWorkflow_FastPath_NoBuildNeeded verifies that when the
+// target run already has a built bundle, RedeployWorkflow skips straight
+// to promoting it — no source fetch, no rebuild. This is the common case:
+// clicking Deploy again for a run that already built successfully.
+func TestRedeployWorkflow_FastPath_NoBuildNeeded(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := newTestEnv(&suite)
+
+	env.OnActivity("PromoteDeploymentActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.PromoteDeploymentOutput{URL: "/api/v1/apps/x/live/index.html"}, nil)
+
+	in := newRedeployInput(false)
+	env.ExecuteWorkflow(apptemporal.RedeployWorkflow, in)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	var result apptemporal.RedeployResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, "live", result.Status)
+
+	// FetchRunSourceActivity/PublishBundleActivity/UpdateRunBundlePathActivity
+	// must never be called — nothing to build, nothing to fetch.
+	env.AssertNotCalled(t, "FetchRunSourceActivity", mock.Anything, mock.Anything)
+	env.AssertNotCalled(t, "PublishBundleActivity", mock.Anything, mock.Anything)
+	env.AssertExpectations(t)
+}
+
+// TestRedeployWorkflow_NeedsBuild_RebuildsFromSavedSource verifies the
+// actual feature the user asked for: Deploy on a run whose build
+// previously failed (only source_path was saved) fetches that saved
+// source and rebuilds it — using the SAME generated code, not asking the
+// LLM to regenerate anything — then promotes the result.
+func TestRedeployWorkflow_NeedsBuild_RebuildsFromSavedSource(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := newTestEnv(&suite)
+
+	savedSource := map[string]string{"src/app/page.tsx": "export default function Page() {}"}
+	env.OnActivity("FetchRunSourceActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.FetchRunSourceOutput{Files: savedSource}, nil)
+
+	var publishedFiles map[string]string
+	env.OnActivity("PublishBundleActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.PublishBundleInput) (apptemporal.PublishBundleOutput, error) {
+			publishedFiles = in.Files
+			return apptemporal.PublishBundleOutput{BundlePath: "runs/" + in.RunID.String() + "/"}, nil
+		})
+
+	var updatedBundlePath string
+	env.OnActivity("UpdateRunBundlePathActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.UpdateRunBundlePathInput) error {
+			updatedBundlePath = in.BundlePath
+			return nil
+		})
+
+	env.OnActivity("PromoteDeploymentActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.PromoteDeploymentOutput{URL: "/api/v1/apps/x/live/index.html"}, nil)
+
+	in := newRedeployInput(true)
+	env.ExecuteWorkflow(apptemporal.RedeployWorkflow, in)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	var result apptemporal.RedeployResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, "live", result.Status)
+
+	require.Equal(t, savedSource, publishedFiles, "must rebuild using the run's saved source, not regenerate")
+	require.Equal(t, "runs/"+in.RunID.String()+"/", updatedBundlePath)
+
+	env.AssertExpectations(t)
+}
+
+// TestRedeployWorkflow_BuildFailure_MarksDeploymentFailed verifies that a
+// failed rebuild marks the deployment row 'failed' rather than leaving it
+// stuck at 'deploying' forever — the exact failure mode of the original,
+// unimplemented deploy stub this whole feature replaces.
+func TestRedeployWorkflow_BuildFailure_MarksDeploymentFailed(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := newTestEnv(&suite)
+
+	env.OnActivity("FetchRunSourceActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.FetchRunSourceOutput{Files: map[string]string{"page.tsx": "x"}}, nil)
+	env.OnActivity("PublishBundleActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.PublishBundleOutput{}, assertError("build failed: module not found"))
+
+	var failedDeploymentID uuid.UUID
+	env.OnActivity("MarkDeploymentFailedActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.MarkDeploymentFailedInput) error {
+			failedDeploymentID = in.DeploymentID
+			return nil
+		})
+
+	in := newRedeployInput(true)
+	env.ExecuteWorkflow(apptemporal.RedeployWorkflow, in)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.Error(t, env.GetWorkflowError())
+	require.Equal(t, in.DeploymentID, failedDeploymentID, "must mark the SAME deployment row that was passed in as failed")
+
+	// A failed rebuild must never reach the promote step.
+	env.AssertNotCalled(t, "PromoteDeploymentActivity", mock.Anything, mock.Anything)
 	env.AssertExpectations(t)
 }

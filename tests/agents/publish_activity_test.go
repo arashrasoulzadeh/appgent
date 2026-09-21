@@ -13,13 +13,24 @@ import (
 )
 
 type fakeProvisioner struct {
-	provisionCalls []map[string]string
-	provisionErr   error
+	provisionCalls       []map[string]string
+	provisionErr         error
+	provisionSourceCalls []map[string]string
+	provisionSourceErr   error
+	fetchSourceFiles     map[string]string
+	fetchSourceErr       error
 }
 
 func (f *fakeProvisioner) Provision(_ context.Context, _ uuid.UUID, files map[string]string) error {
 	f.provisionCalls = append(f.provisionCalls, files)
 	return f.provisionErr
+}
+func (f *fakeProvisioner) ProvisionSource(_ context.Context, _ uuid.UUID, files map[string]string) error {
+	f.provisionSourceCalls = append(f.provisionSourceCalls, files)
+	return f.provisionSourceErr
+}
+func (f *fakeProvisioner) FetchSource(context.Context, uuid.UUID) (map[string]string, error) {
+	return f.fetchSourceFiles, f.fetchSourceErr
 }
 func (f *fakeProvisioner) Promote(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 func (f *fakeProvisioner) Teardown(context.Context, uuid.UUID) error          { return nil }

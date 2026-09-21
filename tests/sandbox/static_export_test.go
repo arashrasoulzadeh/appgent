@@ -2,6 +2,7 @@ package sandbox_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -110,5 +111,78 @@ func TestTeardown_Integration(t *testing.T) {
 	p, _ := newLiveProvisioner(t)
 	if err := p.Teardown(context.Background(), uuid.New()); err != nil {
 		t.Errorf("Teardown: unexpected error: %v", err)
+	}
+}
+
+func TestProvisionSourceAndFetch_Integration(t *testing.T) {
+	p, client := newLiveProvisioner(t)
+	runID := uuid.New()
+	source := map[string]string{
+		"package.json":     `{"name":"test"}`,
+		"src/app/page.tsx": "export default function Page() {}",
+	}
+
+	if err := p.ProvisionSource(context.Background(), runID, source); err != nil {
+		t.Fatalf("ProvisionSource: %v", err)
+	}
+	defer client.DeletePrefix(context.Background(), "test-bucket", sandbox.SourcePrefix(runID))
+
+	got, err := p.FetchSource(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("FetchSource: %v", err)
+	}
+	if len(got) != len(source) {
+		t.Fatalf("FetchSource returned %d files, want %d", len(got), len(source))
+	}
+	for path, want := range source {
+		if got[path] != want {
+			t.Errorf("FetchSource[%q] = %q, want %q", path, got[path], want)
+		}
+	}
+}
+
+func TestFetchSource_NeverProvisioned_Integration(t *testing.T) {
+	p, _ := newLiveProvisioner(t)
+	if _, err := p.FetchSource(context.Background(), uuid.New()); err == nil {
+		t.Error("expected an error fetching source for a run that was never provisioned")
+	}
+}
+
+// TestSourcePrefixDoesNotCollideWithRunPrefix is a regression test: an
+// earlier version nested SourcePrefix under RunPrefix
+// ("runs/<id>/source/"), which meant Promote's ListObjects(RunPrefix)
+// would ALSO match everything under the nested source/ subfolder and copy
+// raw .tsx source into the live site alongside the built index.html.
+// SourcePrefix must live in a separate top-level namespace.
+func TestSourcePrefixDoesNotCollideWithRunPrefix(t *testing.T) {
+	runID := uuid.New()
+	runPrefix := sandbox.RunPrefix(runID)
+	sourcePrefix := sandbox.SourcePrefix(runID)
+	if strings.HasPrefix(sourcePrefix, runPrefix) {
+		t.Fatalf("SourcePrefix(%q) is nested under RunPrefix(%q) — Promote would copy source files into the live site", sourcePrefix, runPrefix)
+	}
+}
+
+func TestPromote_DoesNotIncludeSourceFiles_Integration(t *testing.T) {
+	p, client := newLiveProvisioner(t)
+	appID := uuid.New()
+	runID := uuid.New()
+
+	if err := p.Provision(context.Background(), runID, map[string]string{"index.html": "built"}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	defer client.DeletePrefix(context.Background(), "test-bucket", sandbox.RunPrefix(runID))
+	if err := p.ProvisionSource(context.Background(), runID, map[string]string{"page.tsx": "raw source"}); err != nil {
+		t.Fatalf("ProvisionSource: %v", err)
+	}
+	defer client.DeletePrefix(context.Background(), "test-bucket", sandbox.SourcePrefix(runID))
+
+	if err := p.Promote(context.Background(), appID, runID); err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+	defer client.DeletePrefix(context.Background(), "test-bucket", sandbox.AppLivePrefix(appID))
+
+	if _, err := client.Download(context.Background(), "test-bucket", sandbox.AppLivePrefix(appID)+"page.tsx"); err == nil {
+		t.Error("Promote must not copy raw source files (page.tsx) into the live deployment")
 	}
 }

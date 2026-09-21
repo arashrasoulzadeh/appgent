@@ -28,6 +28,40 @@ func SetBuilder(b sandbox.BuildRunner) {
 	builder = b
 }
 
+// PublishSourceActivity durably saves a run's raw generated source (before
+// build), independent of PublishBundleActivity's build+publish — called
+// first, so source survives even when the build itself fails, letting
+// Deploy retry the build later (RedeployWorkflow) without a full
+// regenerate. Not tracked as its own agent_steps row (it's a fast, purely
+// internal step) — failures are logged by the caller and left non-fatal to
+// the run's own status, same as PublishBundleActivity.
+func PublishSourceActivity(ctx context.Context, in temporal.PublishSourceInput) (temporal.PublishSourceOutput, error) {
+	if provisioner == nil {
+		return temporal.PublishSourceOutput{}, fmt.Errorf("provisioner not configured")
+	}
+	if len(in.Files) == 0 {
+		return temporal.PublishSourceOutput{}, fmt.Errorf("no files to publish")
+	}
+	if err := provisioner.ProvisionSource(ctx, in.RunID, in.Files); err != nil {
+		return temporal.PublishSourceOutput{}, fmt.Errorf("provision source: %w", err)
+	}
+	return temporal.PublishSourceOutput{SourcePath: sandbox.SourcePrefix(in.RunID)}, nil
+}
+
+// FetchRunSourceActivity retrieves a run's previously saved raw source, for
+// RedeployWorkflow to rebuild from without asking the LLM to regenerate
+// anything.
+func FetchRunSourceActivity(ctx context.Context, in temporal.FetchRunSourceInput) (temporal.FetchRunSourceOutput, error) {
+	if provisioner == nil {
+		return temporal.FetchRunSourceOutput{}, fmt.Errorf("provisioner not configured")
+	}
+	files, err := provisioner.FetchSource(ctx, in.RunID)
+	if err != nil {
+		return temporal.FetchRunSourceOutput{}, fmt.Errorf("fetch source: %w", err)
+	}
+	return temporal.FetchRunSourceOutput{Files: files}, nil
+}
+
 // publishStepOutput is what gets stored in the "publish" agent_steps row's
 // output column — the build container's log is the main thing worth
 // showing here, since that's the only real diagnostic for a build failure
