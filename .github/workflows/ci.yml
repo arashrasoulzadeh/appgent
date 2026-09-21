@@ -182,6 +182,12 @@ jobs:
         run: go build -o seed ./cmd/seed
       - name: Run migrations
         run: |
+          go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+          migrate -path ./internal/db/migrations -database "$POSTGRES_DSN" up
+        env:
+          POSTGRES_DSN: postgres://appgent:appgent@localhost:5432/appgent?sslmode=disable
+      - name: Seed admin user
+        run: |
           ./seed
         env:
           POSTGRES_DSN: postgres://appgent:appgent@localhost:5432/appgent?sslmode=disable
