@@ -16,6 +16,8 @@ func NewProviderFromConfig(config ProviderConfig) (Provider, error) {
 		return NewAnthropicProvider(config), nil
 	case "ollama":
 		return NewOllamaProvider(config), nil
+	case "gapgpt":
+		return NewGapGPTProvider(config), nil
 	default:
 		return nil, fmt.Errorf("unknown provider type: %s", config.Type)
 	}
@@ -74,6 +76,16 @@ func NewProviderFromEnv() (Provider, error) {
 		if config.Model == "" {
 			config.Model = os.Getenv("OLLAMA_MODEL")
 		}
+	case "gapgpt":
+		if config.APIKey == "" {
+			config.APIKey = os.Getenv("GAPGPT_API_KEY")
+		}
+		if config.BaseURL == "" {
+			config.BaseURL = os.Getenv("GAPGPT_BASE_URL")
+		}
+		if config.Model == "" {
+			config.Model = os.Getenv("GAPGPT_MODEL")
+		}
 	}
 
 	return NewProviderFromConfig(config)
@@ -89,6 +101,8 @@ func GetDefaultModelForProvider(providerType string) string {
 		return "claude-3-5-haiku-20241022"
 	case "ollama":
 		return "llama3.1:8b"
+	case "gapgpt":
+		return "gpt-4o-mini"
 	default:
 		return "nvidia/nemotron-3-ultra-550b-a55b:free"
 	}
