@@ -45,7 +45,12 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          # .golangci.yml is written in the v1 config schema (output.format,
+          # govet.check-shadowing, linters-settings.maligned, etc.) — v2
+          # renamed/removed those keys, so "latest" (which resolves to a v2
+          # binary) fails config verification. Pin to the last v1 release
+          # until the config is migrated to v2's schema.
+          version: v1.62.2
           install-mode: goinstall
           args: --timeout=5m
 
