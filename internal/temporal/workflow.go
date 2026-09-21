@@ -113,12 +113,22 @@ type CodeInput struct {
 	PriorFiles   map[string]string
 	QAFeedback   []QAIssue
 	AppKind      string
-	// TargetPage scopes this call to generating just one page's route file.
-	// nil means "generate the shared/root files" (layout, config, globals.css,
-	// manifest/sw for pwa, shared layout components) instead of a specific
-	// page. Splitting work this way lets pages generate as parallel Temporal
-	// activities instead of one huge single-shot call for the whole app.
-	TargetPage *PageSpec
+	// TargetPage and TargetComponent scope this call. At most one is set:
+	//   - TargetPage set: generate just that one page's route file (plus
+	//     any small page-local components used only by it).
+	//   - TargetComponent set: generate just that one shared/layout
+	//     component (e.g. Header, Footer) — components with
+	//     ComponentSpec.Type == "layout" in the Plan spec, since those are
+	//     the ones referenced across multiple pages and worth generating
+	//     once, independently, rather than duplicated or coordinated
+	//     page-by-page.
+	//   - Both nil: generate the shared/root files (layout.tsx, package.json,
+	//     tsconfig.json, next.config.js, globals.css, manifest/sw for pwa)
+	//     only — no components, no pages.
+	// Splitting work this way lets pages and shared components generate as
+	// parallel Temporal activities instead of one huge single-shot call.
+	TargetPage      *PageSpec
+	TargetComponent *ComponentSpec
 }
 
 type CodeOutput struct {
@@ -210,24 +220,40 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 		return result, planErr
 	}
 
-	// generateCode fans code generation out into one call per page plus one
-	// for the shared/root files (layout, config, globals.css, manifest/sw
-	// for pwa), run as parallel Temporal activities capped at
-	// maxParallelCode concurrent at a time, then merges every call's Files
-	// into one map. This replaces a single call that generated the whole
-	// app's file tree in one LLM response — smaller, focused calls are both
-	// faster (real concurrency) and safer (a single call producing
-	// truncated/invalid JSON only loses that one page, not the entire run).
+	// generateCode fans code generation out into one call per page, one per
+	// shared/layout component (Header, Footer, etc. — anything in the Plan
+	// spec's component list with Type == "layout"), plus one for the
+	// shared/root files (layout.tsx, config, globals.css, manifest/sw for
+	// pwa), run as parallel Temporal activities capped at maxParallelCode
+	// concurrent at a time, then merges every call's Files into one map.
+	// This replaces a single call that generated the whole app's file tree
+	// in one LLM response — smaller, focused calls are both faster (real
+	// concurrency) and safer (a single call producing truncated/invalid
+	// output only loses that one piece, not the entire run). Non-layout
+	// components (ui/form/etc.) are deliberately NOT split out here — they
+	// risk being generated inconsistently by multiple pages that each
+	// reference them, so those stay page-local, generated inline with
+	// whichever page(s) use them.
 	const maxParallelCode = 5
+	type codeTarget struct {
+		page      *PageSpec
+		component *ComponentSpec
+	}
 	generateCode := func(tokens *DesignTokens, priorFiles map[string]string, qaFeedback []QAIssue) (CodeOutput, error) {
 		codeAttempt++
 		attempt := codeAttempt
 
-		targets := make([]*PageSpec, 0, len(planOutput.Pages)+1)
-		targets = append(targets, nil) // nil => shared/root files
+		targets := make([]codeTarget, 0, len(planOutput.Pages)+len(planOutput.Components)+1)
+		targets = append(targets, codeTarget{}) // shared/root files
+		for i := range planOutput.Components {
+			c := planOutput.Components[i]
+			if c.Type == "layout" {
+				targets = append(targets, codeTarget{component: &c})
+			}
+		}
 		for i := range planOutput.Pages {
 			page := planOutput.Pages[i]
-			targets = append(targets, &page)
+			targets = append(targets, codeTarget{page: &page})
 		}
 
 		merged := make(map[string]string)
@@ -241,14 +267,15 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 			futures := make([]workflow.Future, len(batch))
 			for i, target := range batch {
 				futures[i] = workflow.ExecuteActivity(codeCtx, codeActivityName, CodeInput{
-					RunID:        in.RunID,
-					Attempt:      attempt,
-					Spec:         planOutput,
-					DesignTokens: tokens,
-					PriorFiles:   priorFiles,
-					QAFeedback:   qaFeedback,
-					AppKind:      in.AppKind,
-					TargetPage:   target,
+					RunID:           in.RunID,
+					Attempt:         attempt,
+					Spec:            planOutput,
+					DesignTokens:    tokens,
+					PriorFiles:      priorFiles,
+					QAFeedback:      qaFeedback,
+					AppKind:         in.AppKind,
+					TargetPage:      target.page,
+					TargetComponent: target.component,
 				})
 			}
 			for _, f := range futures {

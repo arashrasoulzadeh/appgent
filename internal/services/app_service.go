@@ -113,21 +113,30 @@ func (s *AgentStep) MarshalJSON() ([]byte, error) {
 	}
 
 	// For "code" steps, a generation run can call CodeActivity multiple
-	// times in parallel within the same attempt (once per page, plus once
-	// for shared/root files — see internal/temporal.GenerateAppWorkflow's
-	// generateCode). agent_type+attempt alone can't distinguish those calls
-	// from each other, so surface which page (if any) this call targeted,
-	// pulled out of the stored input JSON, so the frontend can label and
-	// key them distinctly.
+	// times in parallel within the same attempt (once per page, once per
+	// shared/layout component, plus once for shared/root files — see
+	// internal/temporal.GenerateAppWorkflow's generateCode). agent_type+
+	// attempt alone can't distinguish those calls from each other, so
+	// surface which page or component (if any) this call targeted, pulled
+	// out of the stored input JSON, so the frontend can label and key them
+	// distinctly.
 	var target string
 	if len(s.Input) > 0 {
 		var parsed struct {
 			TargetPage *struct {
 				Name string `json:"Name"`
 			} `json:"TargetPage"`
+			TargetComponent *struct {
+				Name string `json:"Name"`
+			} `json:"TargetComponent"`
 		}
-		if err := json.Unmarshal(s.Input, &parsed); err == nil && parsed.TargetPage != nil {
-			target = parsed.TargetPage.Name
+		if err := json.Unmarshal(s.Input, &parsed); err == nil {
+			switch {
+			case parsed.TargetPage != nil:
+				target = parsed.TargetPage.Name
+			case parsed.TargetComponent != nil:
+				target = parsed.TargetComponent.Name
+			}
 		}
 	}
 

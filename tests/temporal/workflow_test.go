@@ -290,3 +290,68 @@ func TestGenerateAppWorkflow_CodeFansOutByPage(t *testing.T) {
 
 	env.AssertExpectations(t)
 }
+
+// TestGenerateAppWorkflow_CodeFansOutByComponentAndPage verifies that
+// layout-type components (Header, Footer) each get their own parallel
+// CodeActivity call, same as pages, while a non-layout component (e.g. a
+// "ui" or "form" typed one) does NOT — those stay page-local by design, to
+// avoid multiple pages generating divergent copies of the same reusable
+// component independently.
+func TestGenerateAppWorkflow_CodeFansOutByComponentAndPage(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := newTestEnv(&suite)
+
+	pages := []apptemporal.PageSpec{{Name: "Home", Path: "/"}, {Name: "About", Path: "/about"}}
+	components := []apptemporal.ComponentSpec{
+		{Name: "Header", Type: "layout"},
+		{Name: "Footer", Type: "layout"},
+		{Name: "ProjectCard", Type: "ui"}, // not layout — must stay page-local
+	}
+
+	env.OnActivity("PlanActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.PlanOutput{Pages: pages, Components: components}, nil)
+	env.OnActivity("DesignActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.DesignOutput{}, nil)
+
+	var mu sync.Mutex
+	seenTargets := map[string]bool{}
+	env.OnActivity("CodeActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.CodeInput) (apptemporal.CodeOutput, error) {
+			key := "shared"
+			switch {
+			case in.TargetPage != nil:
+				key = "page:" + in.TargetPage.Name
+			case in.TargetComponent != nil:
+				key = "component:" + in.TargetComponent.Name
+			}
+			mu.Lock()
+			seenTargets[key] = true
+			mu.Unlock()
+			return apptemporal.CodeOutput{Files: map[string]string{key + ".tsx": "x"}}, nil
+		})
+	env.OnActivity("QAActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.QAOutput{Passed: true}, nil)
+	env.OnActivity("PersistRunResultActivity", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(nil)
+
+	env.ExecuteWorkflow(apptemporal.GenerateAppWorkflow, newInput())
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	var result apptemporal.GenerateAppResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, "succeeded", result.Status)
+
+	// shared + 2 layout components + 2 pages = 5 calls, NOT 6 — the
+	// non-layout "ProjectCard" component must not get its own call.
+	require.Len(t, seenTargets, 5)
+	require.True(t, seenTargets["shared"])
+	require.True(t, seenTargets["component:Header"])
+	require.True(t, seenTargets["component:Footer"])
+	require.True(t, seenTargets["page:Home"])
+	require.True(t, seenTargets["page:About"])
+	require.False(t, seenTargets["component:ProjectCard"], "non-layout components must stay page-local, not get their own call")
+
+	env.AssertExpectations(t)
+}
