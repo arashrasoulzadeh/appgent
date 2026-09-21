@@ -53,18 +53,18 @@ type App struct {
 }
 
 type Run struct {
-	ID                  uuid.UUID      `json:"id"`
-	AppID               uuid.UUID      `json:"app_id"`
-	Version             int            `json:"version"`
-	UserPrompt          string         `json:"user_prompt"`
-	Status              string         `json:"status"`
-	TemporalWorkflowID  string         `json:"-"`
-	BundlePath          sql.NullString `json:"-"`
-	PreviewURL          sql.NullString `json:"-"`
-	Error               sql.NullString `json:"-"`
-	StartedAt           sql.NullTime   `json:"-"`
-	FinishedAt          sql.NullTime   `json:"-"`
-	CreatedAt           time.Time      `json:"created_at"`
+	ID                 uuid.UUID      `json:"id"`
+	AppID              uuid.UUID      `json:"app_id"`
+	Version            int            `json:"version"`
+	UserPrompt         string         `json:"user_prompt"`
+	Status             string         `json:"status"`
+	TemporalWorkflowID string         `json:"-"`
+	BundlePath         sql.NullString `json:"-"`
+	PreviewURL         sql.NullString `json:"-"`
+	Error              sql.NullString `json:"-"`
+	StartedAt          sql.NullTime   `json:"-"`
+	FinishedAt         sql.NullTime   `json:"-"`
+	CreatedAt          time.Time      `json:"created_at"`
 }
 
 func (r *Run) MarshalJSON() ([]byte, error) {
@@ -87,19 +87,19 @@ func (r *Run) MarshalJSON() ([]byte, error) {
 }
 
 type AgentStep struct {
-	ID         uuid.UUID     `json:"-"`
-	RunID      uuid.UUID     `json:"-"`
-	AgentType  string        `json:"agent_type"`
-	Attempt    int           `json:"attempt"`
-	Input      []byte        `json:"-"`
-	Output     []byte        `json:"-"`
-	ModelUsed  string        `json:"model_used"`
-	TokensUsed sql.NullInt64 `json:"-"`
-	Status     string        `json:"status"`
+	ID         uuid.UUID      `json:"-"`
+	RunID      uuid.UUID      `json:"-"`
+	AgentType  string         `json:"agent_type"`
+	Attempt    int            `json:"attempt"`
+	Input      []byte         `json:"-"`
+	Output     []byte         `json:"-"`
+	ModelUsed  string         `json:"model_used"`
+	TokensUsed sql.NullInt64  `json:"-"`
+	Status     string         `json:"status"`
 	Error      sql.NullString `json:"-"`
-	StartedAt  sql.NullTime  `json:"-"`
-	FinishedAt sql.NullTime  `json:"-"`
-	CreatedAt  time.Time     `json:"-"`
+	StartedAt  sql.NullTime   `json:"-"`
+	FinishedAt sql.NullTime   `json:"-"`
+	CreatedAt  time.Time      `json:"-"`
 }
 
 func (s *AgentStep) MarshalJSON() ([]byte, error) {
@@ -187,6 +187,14 @@ func (s *AppService) Create(ctx context.Context, userID uuid.UUID, name, kind, p
 		return nil, nil, err
 	}
 	defer tx.Rollback(ctx)
+
+	var appCount int
+	if err := tx.QueryRow(ctx, "SELECT COUNT(*) FROM apps WHERE user_id = $1", userID).Scan(&appCount); err != nil {
+		return nil, nil, err
+	}
+	if appCount >= MaxAppsPerUser {
+		return nil, nil, ErrAppLimitReached
+	}
 
 	slug := generateSlug(name)
 	for {
@@ -531,10 +539,14 @@ func (s *AppService) GetPreviewURL(ctx context.Context, userID, appID, runID uui
 }
 
 var (
-	ErrAppNotFound   = errors.New("app not found")
-	ErrRunNotFound   = errors.New("run not found")
-	ErrNoPreview     = errors.New("preview not available")
+	ErrAppNotFound     = errors.New("app not found")
+	ErrRunNotFound     = errors.New("run not found")
+	ErrNoPreview       = errors.New("preview not available")
+	ErrAppLimitReached = errors.New("app limit reached")
 )
+
+// MaxAppsPerUser caps how many apps a single user can create.
+const MaxAppsPerUser = 10
 
 func generateSlug(name string) string {
 	base := strings.ToLower(strings.TrimSpace(name))

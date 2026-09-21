@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 
@@ -56,8 +57,8 @@ func (h *AppHandler) CreateApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Name  string `json:"name"`
-		Kind  string `json:"kind"`
+		Name   string `json:"name"`
+		Kind   string `json:"kind"`
 		Prompt string `json:"prompt"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -72,6 +73,10 @@ func (h *AppHandler) CreateApp(w http.ResponseWriter, r *http.Request) {
 
 	app, run, err := h.appService.Create(r.Context(), userID, req.Name, req.Kind, req.Prompt)
 	if err != nil {
+		if err == services.ErrAppLimitReached {
+			http.Error(w, fmt.Sprintf(`{"error": "you can have at most %d apps"}`, services.MaxAppsPerUser), http.StatusBadRequest)
+			return
+		}
 		http.Error(w, `{"error": "failed to create app"}`, http.StatusInternalServerError)
 		return
 	}

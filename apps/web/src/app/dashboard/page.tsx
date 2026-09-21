@@ -7,6 +7,9 @@ import { formatDate, getInitials, cn } from "@/lib/utils"
 import { Plus, LogOut, LayoutDashboard, Settings, ChevronRight } from "lucide-react"
 import Link from "next/link"
 
+// Keep in sync with services.MaxAppsPerUser (internal/services/app_service.go).
+const MAX_APPS = 10
+
 export default function DashboardPage() {
   const router = useRouter()
   const [apps, setApps] = useState<App[]>([])
@@ -106,12 +109,20 @@ export default function DashboardPage() {
           <h1 className="text-3xl font-bold text-neutral-900 dark:text-white">Your Apps</h1>
           <button
             onClick={() => setShowCreateModal(true)}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors"
+            disabled={apps.length >= MAX_APPS}
+            title={apps.length >= MAX_APPS ? `You've reached the limit of ${MAX_APPS} apps` : undefined}
+            className="inline-flex items-center gap-2 px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-primary-600"
           >
             <Plus className="h-4 w-4" />
             New App
           </button>
         </div>
+
+        {apps.length >= MAX_APPS && (
+          <div className="mb-6 p-4 bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 text-neutral-700 dark:text-neutral-300 rounded-lg text-sm">
+            You've reached the limit of {MAX_APPS} apps. Delete one to create another.
+          </div>
+        )}
 
         {loadError && (
           <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 rounded-lg text-sm flex items-center justify-between">
