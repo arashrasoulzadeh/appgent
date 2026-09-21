@@ -5,12 +5,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/arashrasoulzadeh/appgent/internal/sandbox"
 	apptemporal "github.com/arashrasoulzadeh/appgent/internal/temporal"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -209,12 +211,13 @@ type User struct {
 }
 
 type AppService struct {
-	pool     *pgxpool.Pool
-	temporal temporalclient.Client
+	pool        *pgxpool.Pool
+	temporal    temporalclient.Client
+	provisioner sandbox.Provisioner
 }
 
-func NewAppService(pool *pgxpool.Pool, temporal temporalclient.Client) *AppService {
-	return &AppService{pool: pool, temporal: temporal}
+func NewAppService(pool *pgxpool.Pool, temporal temporalclient.Client, provisioner sandbox.Provisioner) *AppService {
+	return &AppService{pool: pool, temporal: temporal, provisioner: provisioner}
 }
 
 var ErrUserNotFound = errors.New("user not found")
@@ -521,7 +524,16 @@ func (s *AppService) GetRunWithSteps(ctx context.Context, userID, appID, runID u
 	return run, steps, rows.Err()
 }
 
-func (s *AppService) CreateDeployment(ctx context.Context, userID, appID, runID uuid.UUID) (*Deployment, error) {
+var ErrNothingToDeploy = errors.New("no published run to deploy")
+
+// Deploy finds the app's latest run with a published bundle (succeeded or
+// needs_review both count — needs_review still has real generated files,
+// just flagged for review) and promotes it to the app's stable live
+// object-storage prefix, then records a "live" deployment row pointing at
+// it. Unlike the old stub, this never leaves a deployment stuck at
+// "deploying" — the copy is synchronous, so the row is only ever inserted
+// once it's already live.
+func (s *AppService) Deploy(ctx context.Context, userID, appID uuid.UUID) (*Deployment, error) {
 	var owns bool
 	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM apps WHERE id = $1 AND user_id = $2)`, appID, userID).Scan(&owns); err != nil {
 		return nil, err
@@ -530,12 +542,33 @@ func (s *AppService) CreateDeployment(ctx context.Context, userID, appID, runID 
 		return nil, ErrAppNotFound
 	}
 
-	deployment := &Deployment{}
+	var runID uuid.UUID
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO deployments (app_id, run_id, status)
-		VALUES ($1, $2, 'deploying')
+		SELECT id FROM generation_runs
+		WHERE app_id = $1 AND status IN ('succeeded', 'needs_review') AND bundle_path IS NOT NULL
+		ORDER BY version DESC LIMIT 1
+	`, appID).Scan(&runID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNothingToDeploy
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if s.provisioner == nil {
+		return nil, fmt.Errorf("deployment provisioner not configured")
+	}
+	if err := s.provisioner.Promote(ctx, appID, runID); err != nil {
+		return nil, fmt.Errorf("promote bundle: %w", err)
+	}
+
+	deployment := &Deployment{}
+	liveURL := fmt.Sprintf("/api/v1/apps/%s/live/index.html", appID.String())
+	err = s.pool.QueryRow(ctx, `
+		INSERT INTO deployments (app_id, run_id, url, status, deployed_at)
+		VALUES ($1, $2, $3, 'live', now())
 		RETURNING id, app_id, run_id, url, status, deployed_at, created_at
-	`, appID, runID).Scan(
+	`, appID, runID, liveURL).Scan(
 		&deployment.ID, &deployment.AppID, &deployment.RunID, &deployment.URL, &deployment.Status, &deployment.DeployedAt, &deployment.CreatedAt,
 	)
 	if err != nil {
@@ -569,26 +602,33 @@ func (s *AppService) GetDeployments(ctx context.Context, userID, appID uuid.UUID
 	return deployments, rows.Err()
 }
 
+// GetPreviewURL returns a relative API path that serves this run's
+// published bundle (the caller/handler prefixes it with the API's own
+// origin), or ErrNoPreview if the run never published one — either it
+// hasn't finished yet, or publishing failed after generation succeeded.
+// expiresAt is cosmetic now (the bundle doesn't actually expire — it's
+// served from this app's own object storage, not a presigned URL) but
+// kept in the return signature since the API response already shapes
+// around it.
 func (s *AppService) GetPreviewURL(ctx context.Context, userID, appID, runID uuid.UUID) (string, time.Time, error) {
-	var previewURL sql.NullString
-	var expiresAt time.Time
+	var bundlePath sql.NullString
 	err := s.pool.QueryRow(ctx, `
-		SELECT r.preview_url
+		SELECT r.bundle_path
 		FROM generation_runs r
 		JOIN apps a ON r.app_id = a.id
 		WHERE r.id = $1 AND r.app_id = $2 AND a.user_id = $3
-	`, runID, appID, userID).Scan(&previewURL)
+	`, runID, appID, userID).Scan(&bundlePath)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", time.Time{}, ErrRunNotFound
 		}
 		return "", time.Time{}, err
 	}
-	if !previewURL.Valid {
+	if !bundlePath.Valid {
 		return "", time.Time{}, ErrNoPreview
 	}
-	expiresAt = time.Now().Add(1 * time.Hour)
-	return previewURL.String, expiresAt, nil
+	relativeURL := fmt.Sprintf("/api/v1/apps/%s/runs/%s/preview/index.html", appID, runID)
+	return relativeURL, time.Now().Add(24 * time.Hour), nil
 }
 
 var (

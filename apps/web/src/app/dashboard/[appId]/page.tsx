@@ -165,7 +165,7 @@ export default function AppDetailPage() {
     try {
       await api.deployApp(appId)
       loadDeployments()
-      toast({ title: "Deployment started", description: "Check the Deployments tab for progress" })
+      toast({ title: "Deployed", description: "Your app is live — check the Deployments tab for the link" })
     } catch (err) {
       toast({ title: "Failed to deploy", description: apiErrorMessage(err, "Unknown error"), variant: "destructive" })
     } finally {

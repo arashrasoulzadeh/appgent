@@ -9,6 +9,8 @@ import (
 
 	"github.com/arashrasoulzadeh/appgent/internal/agents"
 	"github.com/arashrasoulzadeh/appgent/internal/config"
+	"github.com/arashrasoulzadeh/appgent/internal/sandbox"
+	"github.com/arashrasoulzadeh/appgent/internal/storage"
 	"github.com/arashrasoulzadeh/appgent/internal/temporal"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/activity"
@@ -47,6 +49,17 @@ func main() {
 	// (agent_steps rows) — see internal/agents/tracking.go.
 	agents.SetDBPool(pool)
 
+	storageClient, err := storage.NewClient(
+		cfg.ObjectStorageEndpoint,
+		cfg.ObjectStorageAccessKey,
+		cfg.ObjectStorageSecretKey,
+		false,
+	)
+	if err != nil {
+		log.Fatalf("Failed to connect to object storage: %v", err)
+	}
+	agents.SetProvisioner(sandbox.NewStaticExportProvisioner(storageClient, cfg.ObjectStorageBucket))
+
 	// Register workflow and activities. Activities are registered under
 	// explicit names matching what GenerateAppWorkflow references by
 	// string (internal/temporal/workflow.go) — the real implementations
@@ -59,6 +72,7 @@ func main() {
 	w.RegisterActivityWithOptions(agents.CodeActivity, activity.RegisterOptions{Name: "CodeActivity"})
 	w.RegisterActivityWithOptions(agents.QAActivity, activity.RegisterOptions{Name: "QAActivity"})
 	w.RegisterActivityWithOptions(persistActivities.PersistRunResult, activity.RegisterOptions{Name: "PersistRunResultActivity"})
+	w.RegisterActivityWithOptions(agents.PublishBundleActivity, activity.RegisterOptions{Name: "PublishBundleActivity"})
 
 	// Start worker
 	err = w.Start()

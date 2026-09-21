@@ -42,11 +42,16 @@ func (a *PersistActivities) PersistRunResult(ctx context.Context, runID, appID u
 		errText = &result.Error
 	}
 
+	var bundlePath *string
+	if result.BundlePath != "" {
+		bundlePath = &result.BundlePath
+	}
+
 	_, err = tx.Exec(ctx, `
 		UPDATE generation_runs
-		SET status = $1, error = $2, finished_at = now()
+		SET status = $1, error = $2, finished_at = now(), bundle_path = $4
 		WHERE id = $3
-	`, result.Status, errText, runID)
+	`, result.Status, errText, runID, bundlePath)
 	if err != nil {
 		return fmt.Errorf("update generation_runs: %w", err)
 	}

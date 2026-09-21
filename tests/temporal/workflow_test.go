@@ -59,6 +59,12 @@ func newTestEnv(suite *testsuite.WorkflowTestSuite) *testsuite.TestWorkflowEnvir
 		func(context.Context, uuid.UUID, uuid.UUID, apptemporal.GenerateAppResult) error { return nil },
 		activity.RegisterOptions{Name: "PersistRunResultActivity"},
 	)
+	env.RegisterActivityWithOptions(
+		func(context.Context, apptemporal.PublishBundleInput) (apptemporal.PublishBundleOutput, error) {
+			return apptemporal.PublishBundleOutput{}, nil
+		},
+		activity.RegisterOptions{Name: "PublishBundleActivity"},
+	)
 	return env
 }
 
@@ -478,6 +484,91 @@ func TestGenerateAppWorkflow_SequentialCodeWhenParallelDisabled(t *testing.T) {
 	defer mu.Unlock()
 	require.Equal(t, 4, calls) // 1 shared + 3 pages
 	require.Equal(t, 1, maxInFlight, "ParallelCode: false must never have more than 1 CodeActivity call in flight")
+
+	env.AssertExpectations(t)
+}
+
+// TestGenerateAppWorkflow_PublishesBundleOnSuccess is a regression test for
+// the bug where a succeeded/needs_review run never actually published its
+// generated files anywhere — PersistRunResult only ever wrote status/error,
+// so bundle_path stayed NULL forever and preview/deploy were permanently
+// broken. Asserts PublishBundleActivity is called with the final merged
+// files and its BundlePath ends up on the workflow result.
+func TestGenerateAppWorkflow_PublishesBundleOnSuccess(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := newTestEnv(&suite)
+
+	env.OnActivity("PlanActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.PlanOutput{Pages: []apptemporal.PageSpec{{Name: "Home", Path: "/"}}}, nil)
+	env.OnActivity("DesignActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.DesignOutput{}, nil)
+	env.OnActivity("CodeActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.CodeInput) (apptemporal.CodeOutput, error) {
+			key := "shared.tsx"
+			if in.TargetPage != nil {
+				key = in.TargetPage.Name + ".tsx"
+			}
+			return apptemporal.CodeOutput{Files: map[string]string{key: "content"}}, nil
+		})
+	env.OnActivity("QAActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.QAOutput{Passed: true}, nil)
+	env.OnActivity("PersistRunResultActivity", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(nil)
+
+	var publishedFiles map[string]string
+	env.OnActivity("PublishBundleActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.PublishBundleInput) (apptemporal.PublishBundleOutput, error) {
+			publishedFiles = in.Files
+			return apptemporal.PublishBundleOutput{BundlePath: "runs/" + in.RunID.String() + "/"}, nil
+		})
+
+	in := newInput()
+	env.ExecuteWorkflow(apptemporal.GenerateAppWorkflow, in)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	var result apptemporal.GenerateAppResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, "succeeded", result.Status)
+	require.Equal(t, "runs/"+in.RunID.String()+"/", result.BundlePath)
+
+	require.Equal(t, map[string]string{"shared.tsx": "content", "Home.tsx": "content"}, publishedFiles)
+
+	env.AssertExpectations(t)
+}
+
+// TestGenerateAppWorkflow_PublishFailureDoesNotFailRun verifies that a
+// PublishBundleActivity failure is non-fatal: the run still ends up
+// "succeeded" (generation itself worked), just with an empty BundlePath —
+// deliberately not turning a working generation into a failed run just
+// because publishing the bundle for preview/deploy didn't work.
+func TestGenerateAppWorkflow_PublishFailureDoesNotFailRun(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := newTestEnv(&suite)
+
+	env.OnActivity("PlanActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.PlanOutput{Pages: []apptemporal.PageSpec{{Name: "Home", Path: "/"}}}, nil)
+	env.OnActivity("DesignActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.DesignOutput{}, nil)
+	env.OnActivity("CodeActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.CodeOutput{Files: map[string]string{"index.tsx": "x"}}, nil)
+	env.OnActivity("QAActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.QAOutput{Passed: true}, nil)
+	env.OnActivity("PersistRunResultActivity", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(nil)
+	env.OnActivity("PublishBundleActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.PublishBundleOutput{}, fmt.Errorf("object storage unreachable"))
+
+	env.ExecuteWorkflow(apptemporal.GenerateAppWorkflow, newInput())
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	var result apptemporal.GenerateAppResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, "succeeded", result.Status)
+	require.Empty(t, result.BundlePath)
 
 	env.AssertExpectations(t)
 }

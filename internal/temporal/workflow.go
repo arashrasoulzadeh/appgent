@@ -24,6 +24,25 @@ type GenerateAppInput struct {
 type GenerateAppResult struct {
 	Status string
 	Error  string
+	// BundlePath is the object-storage prefix (e.g. "runs/<runID>/") the
+	// generated files were published under, set on the "succeeded" and
+	// "needs_review" exit paths whenever publishing succeeded. Empty means
+	// no preview/deploy is available for this run (either it never
+	// produced files, or publishing itself failed — which is logged but
+	// deliberately non-fatal to the run's own status).
+	BundlePath string
+}
+
+// PublishBundleInput/Output are used by PublishBundleActivity, which
+// uploads a run's final generated files to object storage so they can be
+// served back for preview/deployment. See internal/agents.PublishBundleActivity.
+type PublishBundleInput struct {
+	RunID uuid.UUID
+	Files map[string]string
+}
+
+type PublishBundleOutput struct {
+	BundlePath string
 }
 
 type PlanInput struct {
@@ -167,6 +186,7 @@ const (
 	codeActivityName    = "CodeActivity"
 	qaActivityName      = "QAActivity"
 	persistActivityName = "PersistRunResultActivity"
+	publishActivityName = "PublishBundleActivity"
 )
 
 // GenerateAppWorkflow orchestrates Plan -> (Design || Code) -> QA-retry-loop.
@@ -198,6 +218,14 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 		},
 	})
 	codeAttempt := 0
+
+	publishCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		StartToCloseTimeout: 2 * time.Minute,
+		RetryPolicy: &temporal.RetryPolicy{
+			MaximumAttempts: 3,
+			InitialInterval: 5 * time.Second,
+		},
+	})
 
 	// Persist whatever the final result ends up being, on every exit path
 	// (success, needs_review, or failure) — this is what keeps
@@ -390,6 +418,30 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 		return result, codeErr
 	}
 
+	// finishWithBundle is the single exit point for the "succeeded" and
+	// "needs_review" statuses — both have real generated files worth
+	// previewing/deploying, unlike "failed". Publishing failure is logged
+	// but never turns an otherwise-successful generation into a failed
+	// run; it just leaves BundlePath empty, so preview/deploy are
+	// unavailable for that run until it's regenerated.
+	finishWithBundle := func(status, errMsg string) (GenerateAppResult, error) {
+		bundlePath := ""
+		if len(codeOutput.Files) > 0 {
+			var pubOut PublishBundleOutput
+			pubErr := workflow.ExecuteActivity(publishCtx, publishActivityName, PublishBundleInput{
+				RunID: in.RunID,
+				Files: codeOutput.Files,
+			}).Get(publishCtx, &pubOut)
+			if pubErr != nil {
+				workflow.GetLogger(ctx).Warn("publish bundle failed", "runID", in.RunID, "error", pubErr)
+			} else {
+				bundlePath = pubOut.BundlePath
+			}
+		}
+		result = GenerateAppResult{Status: status, Error: errMsg, BundlePath: bundlePath}
+		return result, nil
+	}
+
 	var designOutput DesignOutput
 	if err := designFuture.Get(ctx, &designOutput); err != nil {
 		result = GenerateAppResult{Status: "failed", Error: err.Error()}
@@ -423,13 +475,11 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 		}
 
 		if qaOutput.Passed {
-			result = GenerateAppResult{Status: "succeeded", Error: ""}
-			return result, nil
+			return finishWithBundle("succeeded", "")
 		}
 
 		if attempt == maxQARetries {
-			result = GenerateAppResult{Status: "needs_review", Error: "QA failed after max retries"}
-			return result, nil
+			return finishWithBundle("needs_review", "QA failed after max retries")
 		}
 
 		// Re-run Code with QA feedback
@@ -441,6 +491,5 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 		codeOutput = updatedCodeOutput
 	}
 
-	result = GenerateAppResult{Status: "needs_review", Error: "QA failed after max retries"}
-	return result, nil
+	return finishWithBundle("needs_review", "QA failed after max retries")
 }

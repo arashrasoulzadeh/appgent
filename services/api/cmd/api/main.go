@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"syscall"
 	"time"
 
@@ -14,7 +15,9 @@ import (
 	"github.com/arashrasoulzadeh/appgent/internal/handlers"
 	"github.com/arashrasoulzadeh/appgent/internal/logger"
 	"github.com/arashrasoulzadeh/appgent/internal/middleware"
+	"github.com/arashrasoulzadeh/appgent/internal/sandbox"
 	"github.com/arashrasoulzadeh/appgent/internal/services"
+	"github.com/arashrasoulzadeh/appgent/internal/storage"
 	temporalclient "go.temporal.io/sdk/client"
 )
 
@@ -52,13 +55,25 @@ func main() {
 		false, // secure = false for local dev
 	)
 
-	appService := services.NewAppService(pool, temporalClient)
+	storageClient, err := storage.NewClient(
+		cfg.ObjectStorageEndpoint,
+		cfg.ObjectStorageAccessKey,
+		cfg.ObjectStorageSecretKey,
+		false,
+	)
+	if err != nil {
+		log.Error("Failed to connect to object storage", "error", err)
+		os.Exit(1)
+	}
+	provisioner := sandbox.NewStaticExportProvisioner(storageClient, cfg.ObjectStorageBucket)
+
+	appService := services.NewAppService(pool, temporalClient, provisioner)
 
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(tokenService, appService)
 	appHandler := handlers.NewAppHandler(appService)
 	deploymentHandler := handlers.NewDeploymentHandler(appService)
-	previewHandler := handlers.NewPreviewHandler(appService)
+	previewHandler := handlers.NewPreviewHandler(appService, storageClient, cfg.ObjectStorageBucket)
 	sseHandler := handlers.NewSSEHandler(appService)
 	healthHandler := handlers.NewHealthHandler(pool)
 
@@ -71,6 +86,9 @@ func main() {
 	// Public routes
 	mux.HandleFunc("POST /api/v1/auth/login", authHandler.Login)
 	mux.HandleFunc("GET /healthz", healthHandler.Healthz)
+	// A deployment's whole point is being a shareable public URL, unlike a
+	// run preview (which stays behind auth, below) — deliberately public.
+	mux.HandleFunc("GET /api/v1/apps/{app_id}/live/{path...}", previewHandler.ServeLiveFile)
 
 	// Protected routes
 	protected := http.NewServeMux()
@@ -91,6 +109,7 @@ func main() {
 	protected.HandleFunc("GET /api/v1/apps/{app_id}/deployments", deploymentHandler.ListDeployments)
 
 	protected.HandleFunc("GET /api/v1/apps/{app_id}/runs/{run_id}/preview", previewHandler.GetPreviewURL)
+	protected.HandleFunc("GET /api/v1/apps/{app_id}/runs/{run_id}/preview/{path...}", previewHandler.ServeRunFile)
 
 	// Apply middleware chain
 	handler := middleware.CORSMiddleware(cfg.CORSAllowedOrigin)(
@@ -99,8 +118,11 @@ func main() {
 				middleware.LoggingMiddleware(log)(
 					middleware.RateLimitMiddleware(rateLimiter, middleware.UserRateLimitKey)(
 						http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-							// Route to protected or public
-							if r.URL.Path == "/api/v1/auth/login" || r.URL.Path == "/healthz" {
+							// Route to protected or public. Deployment
+							// "live" URLs are the one dynamic public path
+							// (.../apps/{id}/live/...) — everything else
+							// dynamic requires auth.
+							if r.URL.Path == "/api/v1/auth/login" || r.URL.Path == "/healthz" || isLiveDeploymentPath(r.URL.Path) {
 								mux.ServeHTTP(w, r)
 							} else {
 								middleware.AuthMiddleware(tokenService)(protected).ServeHTTP(w, r)
@@ -140,4 +162,10 @@ func main() {
 		log.Error("Server shutdown error", "error", err)
 	}
 	log.Info("Server stopped")
+}
+
+var liveDeploymentPathRe = regexp.MustCompile(`^/api/v1/apps/[^/]+/live(/.*)?$`)
+
+func isLiveDeploymentPath(path string) bool {
+	return liveDeploymentPathRe.MatchString(path)
 }

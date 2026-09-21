@@ -10,82 +10,104 @@ import (
 	"github.com/google/uuid"
 )
 
-// storage.NewClient's current implementation is a placeholder that never
-// makes a real network call (see internal/storage/storage.go), so
-// constructing one here and exercising StaticExportProvisioner against it is
-// safe and involves no live infra.
-func newTestProvisioner(t *testing.T) *sandbox.StaticExportProvisioner {
-	t.Helper()
-	client, err := storage.NewClient("localhost:9000", "access", "secret", false)
-	if err != nil {
-		t.Fatalf("storage.NewClient: %v", err)
-	}
-	return sandbox.NewStaticExportProvisioner(client, "test-bucket", "https://preview.example.com", "apps.example.com")
-}
-
 func TestProvisionerImplementsInterface(t *testing.T) {
 	var _ sandbox.Provisioner = (*sandbox.StaticExportProvisioner)(nil)
 }
 
-// TestProvision is a regression test for a bug where Upload was called with
-// a nil io.Reader instead of the actual file content (strings.NewReader),
-// which would silently drop every generated file's contents.
-func TestProvision(t *testing.T) {
-	p := newTestProvisioner(t)
+func TestRunPrefixAndAppLivePrefix(t *testing.T) {
+	runID := uuid.New()
+	if got, want := sandbox.RunPrefix(runID), "runs/"+runID.String()+"/"; got != want {
+		t.Errorf("RunPrefix() = %q, want %q", got, want)
+	}
+	appID := uuid.New()
+	if got, want := sandbox.AppLivePrefix(appID), "apps/"+appID.String()+"/"; got != want {
+		t.Errorf("AppLivePrefix() = %q, want %q", got, want)
+	}
+}
+
+// newLiveProvisioner connects to a real MinIO instance for integration
+// testing. Unlike the old placeholder storage.Client, NewClient's
+// StaticExportProvisioner now performs real network I/O (PutObject,
+// ListObjects, CopyObject), so these tests need a reachable MinIO — skip
+// rather than fail when one isn't available (e.g. running `go test ./...`
+// outside docker compose), matching the pattern used for Postgres-backed
+// integration tests in tests/services.
+func newLiveProvisioner(t *testing.T) (*sandbox.StaticExportProvisioner, *storage.Client) {
+	t.Helper()
+	client, err := storage.NewClient("localhost:9000", "minioadmin", "minioadmin", false)
+	if err != nil {
+		t.Fatalf("storage.NewClient: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := client.EnsureBucket(ctx, "test-bucket"); err != nil {
+		t.Skipf("no reachable MinIO at localhost:9000, skipping integration test: %v", err)
+	}
+	return sandbox.NewStaticExportProvisioner(client, "test-bucket"), client
+}
+
+func TestProvisionAndServe_Integration(t *testing.T) {
+	p, client := newLiveProvisioner(t)
 	runID := uuid.New()
 	files := map[string]string{
 		"index.html": "<html></html>",
 		"about.html": "<html><body>about</body></html>",
 	}
 
-	previewURL, expiresAt, err := p.Provision(context.Background(), runID, files)
-	if err != nil {
+	if err := p.Provision(context.Background(), runID, files); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
+	defer client.DeletePrefix(context.Background(), "test-bucket", sandbox.RunPrefix(runID))
 
-	wantURL := "https://preview.example.com/runs/" + runID.String() + "/index.html"
-	if previewURL != wantURL {
-		t.Errorf("previewURL = %q, want %q", previewURL, wantURL)
-	}
-	if !expiresAt.After(time.Now()) {
-		t.Errorf("expiresAt = %v, want a time in the future", expiresAt)
-	}
-	if expiresAt.After(time.Now().Add(2 * time.Hour)) {
-		t.Errorf("expiresAt = %v, want within ~1 hour", expiresAt)
-	}
-}
-
-func TestProvisionEmptyFiles(t *testing.T) {
-	p := newTestProvisioner(t)
-	runID := uuid.New()
-
-	previewURL, _, err := p.Provision(context.Background(), runID, map[string]string{})
+	obj, err := client.Download(context.Background(), "test-bucket", sandbox.RunPrefix(runID)+"index.html")
 	if err != nil {
-		t.Fatalf("Provision with no files should not error: %v", err)
+		t.Fatalf("Download published file: %v", err)
 	}
-	if previewURL == "" {
-		t.Error("expected a non-empty preview URL even with no files")
+	defer obj.Close()
+}
+
+func TestProvisionEmptyFiles_Integration(t *testing.T) {
+	p, _ := newLiveProvisioner(t)
+	// Provisioning zero files is a no-op, not an error — the run just
+	// won't have anything to preview.
+	if err := p.Provision(context.Background(), uuid.New(), map[string]string{}); err != nil {
+		t.Errorf("Provision with no files should not error: %v", err)
 	}
 }
 
-func TestPromote(t *testing.T) {
-	p := newTestProvisioner(t)
+func TestPromote_Integration(t *testing.T) {
+	p, client := newLiveProvisioner(t)
 	appID := uuid.New()
 	runID := uuid.New()
 
-	liveURL, err := p.Promote(context.Background(), appID, runID)
-	if err != nil {
+	if err := p.Provision(context.Background(), runID, map[string]string{"index.html": "hi"}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	defer client.DeletePrefix(context.Background(), "test-bucket", sandbox.RunPrefix(runID))
+
+	if err := p.Promote(context.Background(), appID, runID); err != nil {
 		t.Fatalf("Promote: %v", err)
 	}
+	defer client.DeletePrefix(context.Background(), "test-bucket", sandbox.AppLivePrefix(appID))
 
-	wantPrefix := "https://" + appID.String()[:8] + ".apps.example.com"
-	if liveURL != wantPrefix {
-		t.Errorf("liveURL = %q, want %q", liveURL, wantPrefix)
+	obj, err := client.Download(context.Background(), "test-bucket", sandbox.AppLivePrefix(appID)+"index.html")
+	if err != nil {
+		t.Fatalf("Download promoted file: %v", err)
+	}
+	defer obj.Close()
+}
+
+func TestPromote_NoPublishedRun_Integration(t *testing.T) {
+	p, _ := newLiveProvisioner(t)
+	// Promoting a run that was never provisioned has nothing to copy —
+	// must error, not silently produce an empty "live" deployment.
+	if err := p.Promote(context.Background(), uuid.New(), uuid.New()); err == nil {
+		t.Error("expected an error promoting a run with no published files")
 	}
 }
 
-func TestTeardown(t *testing.T) {
-	p := newTestProvisioner(t)
+func TestTeardown_Integration(t *testing.T) {
+	p, _ := newLiveProvisioner(t)
 	if err := p.Teardown(context.Background(), uuid.New()); err != nil {
 		t.Errorf("Teardown: unexpected error: %v", err)
 	}

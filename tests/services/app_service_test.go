@@ -27,7 +27,11 @@ func newTestAppService(t *testing.T, pool *pgxpool.Pool) *services.AppService {
 		t.Skipf("Temporal not available: %v", err)
 	}
 	t.Cleanup(tc.Close)
-	return services.NewAppService(pool, tc)
+	// nil provisioner is fine for tests that never reach a real
+	// publish/deploy against object storage — Deploy's ownership check
+	// and its "no published run" check both happen before the
+	// provisioner would ever be touched.
+	return services.NewAppService(pool, tc, nil)
 }
 
 func TestAppService_Create_Integration(t *testing.T) {
@@ -314,11 +318,14 @@ func TestAppService_GetPreviewURL_CrossUser_Integration(t *testing.T) {
 	assert.ErrorIs(t, err, services.ErrRunNotFound, "GetPreviewURL must not leak another user's run")
 }
 
-// TestAppService_CreateDeployment_CrossUser_Integration guards against the
-// bug where CreateDeployment took no userID parameter at all and never
-// verified that the caller owned the target app before inserting a
-// deployment row for it.
-func TestAppService_CreateDeployment_CrossUser_Integration(t *testing.T) {
+// TestAppService_Deploy_CrossUser_Integration guards against the bug where
+// deployment creation took no userID parameter at all and never verified
+// that the caller owned the target app. The ownership check must fail
+// before Deploy ever gets to its "does this app have a published run to
+// deploy" check — asserted here by the owner and attacker getting
+// different errors (ErrNothingToDeploy vs ErrAppNotFound) for the exact
+// same app/run state.
+func TestAppService_Deploy_CrossUser_Integration(t *testing.T) {
 	dsn := "postgres://appgent:appgent@localhost:5433/appgent?sslmode=disable"
 	ctx := context.Background()
 
@@ -332,14 +339,16 @@ func TestAppService_CreateDeployment_CrossUser_Integration(t *testing.T) {
 	ownerID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 	attackerID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
 
-	app, run, err := service.Create(ctx, ownerID, "Cross User Deploy", "website", "Test")
+	app, _, err := service.Create(ctx, ownerID, "Cross User Deploy", "website", "Test")
 	require.NoError(t, err)
 	defer service.Delete(ctx, ownerID, app.ID)
 
-	_, err = service.CreateDeployment(ctx, attackerID, app.ID, run.ID)
-	assert.ErrorIs(t, err, services.ErrAppNotFound, "CreateDeployment must reject a non-owner")
+	_, err = service.Deploy(ctx, attackerID, app.ID)
+	assert.ErrorIs(t, err, services.ErrAppNotFound, "Deploy must reject a non-owner before checking for a publishable run")
 
-	deployment, err := service.CreateDeployment(ctx, ownerID, app.ID, run.ID)
-	require.NoError(t, err)
-	assert.Equal(t, app.ID, deployment.AppID)
+	// The run was never actually generated (no bundle_path), so even the
+	// real owner can't deploy it yet — proves Deploy doesn't just silently
+	// create a stuck row for an unpublished run.
+	_, err = service.Deploy(ctx, ownerID, app.ID)
+	assert.ErrorIs(t, err, services.ErrNothingToDeploy)
 }
