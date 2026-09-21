@@ -173,6 +173,11 @@ export interface AgentStep {
   finished_at?: string
   output_summary?: string
   error?: string
+  // Which page this step targeted — only set for "code" steps, since code
+  // generation runs as one parallel call per page plus one for shared/root
+  // files within a single attempt (see internal/temporal.GenerateAppWorkflow).
+  // Absent/empty means "shared/root files".
+  target?: string
 }
 
 export interface Deployment {

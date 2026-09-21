@@ -111,6 +111,26 @@ func (s *AgentStep) MarshalJSON() ([]byte, error) {
 			summary = summary[:300] + "..."
 		}
 	}
+
+	// For "code" steps, a generation run can call CodeActivity multiple
+	// times in parallel within the same attempt (once per page, plus once
+	// for shared/root files — see internal/temporal.GenerateAppWorkflow's
+	// generateCode). agent_type+attempt alone can't distinguish those calls
+	// from each other, so surface which page (if any) this call targeted,
+	// pulled out of the stored input JSON, so the frontend can label and
+	// key them distinctly.
+	var target string
+	if len(s.Input) > 0 {
+		var parsed struct {
+			TargetPage *struct {
+				Name string `json:"Name"`
+			} `json:"TargetPage"`
+		}
+		if err := json.Unmarshal(s.Input, &parsed); err == nil && parsed.TargetPage != nil {
+			target = parsed.TargetPage.Name
+		}
+	}
+
 	return json.Marshal(struct {
 		*alias
 		TokensUsed    *int64     `json:"tokens_used,omitempty"`
@@ -118,6 +138,7 @@ func (s *AgentStep) MarshalJSON() ([]byte, error) {
 		StartedAt     *time.Time `json:"started_at,omitempty"`
 		FinishedAt    *time.Time `json:"finished_at,omitempty"`
 		OutputSummary string     `json:"output_summary,omitempty"`
+		Target        string     `json:"target,omitempty"`
 	}{
 		alias:         (*alias)(s),
 		TokensUsed:    nullInt64(s.TokensUsed),
@@ -125,6 +146,7 @@ func (s *AgentStep) MarshalJSON() ([]byte, error) {
 		StartedAt:     nullTime(s.StartedAt),
 		FinishedAt:    nullTime(s.FinishedAt),
 		OutputSummary: summary,
+		Target:        target,
 	})
 }
 

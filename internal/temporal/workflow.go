@@ -113,6 +113,12 @@ type CodeInput struct {
 	PriorFiles   map[string]string
 	QAFeedback   []QAIssue
 	AppKind      string
+	// TargetPage scopes this call to generating just one page's route file.
+	// nil means "generate the shared/root files" (layout, config, globals.css,
+	// manifest/sw for pwa, shared layout components) instead of a specific
+	// page. Splitting work this way lets pages generate as parallel Temporal
+	// activities instead of one huge single-shot call for the whole app.
+	TargetPage *PageSpec
 }
 
 type CodeOutput struct {
@@ -172,10 +178,6 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 		},
 	})
 	codeAttempt := 0
-	nextCodeAttempt := func() int {
-		codeAttempt++
-		return codeAttempt
-	}
 
 	// Persist whatever the final result ends up being, on every exit path
 	// (success, needs_review, or failure) — this is what keeps
@@ -204,17 +206,70 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 		return result, planErr
 	}
 
-	// Design and Code run in parallel (as Futures)
+	// generateCode fans code generation out into one call per page plus one
+	// for the shared/root files (layout, config, globals.css, manifest/sw
+	// for pwa), run as parallel Temporal activities capped at
+	// maxParallelCode concurrent at a time, then merges every call's Files
+	// into one map. This replaces a single call that generated the whole
+	// app's file tree in one LLM response — smaller, focused calls are both
+	// faster (real concurrency) and safer (a single call producing
+	// truncated/invalid JSON only loses that one page, not the entire run).
+	const maxParallelCode = 5
+	generateCode := func(tokens *DesignTokens, priorFiles map[string]string, qaFeedback []QAIssue) (CodeOutput, error) {
+		codeAttempt++
+		attempt := codeAttempt
+
+		targets := make([]*PageSpec, 0, len(planOutput.Pages)+1)
+		targets = append(targets, nil) // nil => shared/root files
+		for i := range planOutput.Pages {
+			page := planOutput.Pages[i]
+			targets = append(targets, &page)
+		}
+
+		merged := make(map[string]string)
+		for start := 0; start < len(targets); start += maxParallelCode {
+			end := start + maxParallelCode
+			if end > len(targets) {
+				end = len(targets)
+			}
+			batch := targets[start:end]
+
+			futures := make([]workflow.Future, len(batch))
+			for i, target := range batch {
+				futures[i] = workflow.ExecuteActivity(codeCtx, codeActivityName, CodeInput{
+					RunID:        in.RunID,
+					Attempt:      attempt,
+					Spec:         planOutput,
+					DesignTokens: tokens,
+					PriorFiles:   priorFiles,
+					QAFeedback:   qaFeedback,
+					AppKind:      in.AppKind,
+					TargetPage:   target,
+				})
+			}
+			for _, f := range futures {
+				var out CodeOutput
+				if err := f.Get(ctx, &out); err != nil {
+					return CodeOutput{}, err
+				}
+				for path, content := range out.Files {
+					merged[path] = content
+				}
+			}
+		}
+		return CodeOutput{Files: merged}, nil
+	}
+
+	// Design runs concurrently with the (fanned-out, parallel-by-page) Code
+	// generation below — the design Future is dispatched here and only
+	// awaited after generateCode's own futures have been issued.
 	designFuture := workflow.ExecuteActivity(ctx, designActivityName, DesignInput{RunID: in.RunID, Spec: planOutput})
-	codeFuture := workflow.ExecuteActivity(codeCtx, codeActivityName, CodeInput{
-		RunID:        in.RunID,
-		Attempt:      nextCodeAttempt(),
-		Spec:         planOutput,
-		DesignTokens: nil,
-		PriorFiles:   nil,
-		QAFeedback:   nil,
-		AppKind:      in.AppKind,
-	})
+
+	codeOutput, codeErr := generateCode(nil, nil, nil)
+	if codeErr != nil {
+		result = GenerateAppResult{Status: "failed", Error: codeErr.Error()}
+		return result, codeErr
+	}
 
 	var designOutput DesignOutput
 	if err := designFuture.Get(ctx, &designOutput); err != nil {
@@ -222,24 +277,9 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 		return result, err
 	}
 
-	var codeOutput CodeOutput
-	if err := codeFuture.Get(ctx, &codeOutput); err != nil {
-		result = GenerateAppResult{Status: "failed", Error: err.Error()}
-		return result, err
-	}
-
 	// If design finished, re-run Code with design tokens
 	if designOutput.Tokens.Colors != (ColorPalette{}) {
-		var updatedCodeOutput CodeOutput
-		execErr := workflow.ExecuteActivity(codeCtx, codeActivityName, CodeInput{
-			RunID:        in.RunID,
-			Attempt:      nextCodeAttempt(),
-			Spec:         planOutput,
-			DesignTokens: &designOutput.Tokens,
-			PriorFiles:   codeOutput.Files,
-			QAFeedback:   nil,
-			AppKind:      in.AppKind,
-		}).Get(ctx, &updatedCodeOutput)
+		updatedCodeOutput, execErr := generateCode(&designOutput.Tokens, codeOutput.Files, nil)
 		if execErr != nil {
 			result = GenerateAppResult{Status: "failed", Error: execErr.Error()}
 			return result, execErr
@@ -274,16 +314,7 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 		}
 
 		// Re-run Code with QA feedback
-		var updatedCodeOutput CodeOutput
-		retryErr := workflow.ExecuteActivity(codeCtx, codeActivityName, CodeInput{
-			RunID:        in.RunID,
-			Attempt:      nextCodeAttempt(),
-			Spec:         planOutput,
-			DesignTokens: &designOutput.Tokens,
-			PriorFiles:   codeOutput.Files,
-			QAFeedback:   qaOutput.Issues,
-			AppKind:      in.AppKind,
-		}).Get(ctx, &updatedCodeOutput)
+		updatedCodeOutput, retryErr := generateCode(&designOutput.Tokens, codeOutput.Files, qaOutput.Issues)
 		if retryErr != nil {
 			result = GenerateAppResult{Status: "failed", Error: retryErr.Error()}
 			return result, retryErr

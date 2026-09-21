@@ -292,10 +292,16 @@ export default function AppDetailPage() {
                         const isActive = selectedRun.status === "running" &&
                           steps.slice(0, idx).every(s => s.status === "succeeded") &&
                           (step.status === "running" || step.status === "pending")
+                        // Code generation runs as one parallel call per page
+                        // plus one for shared/root files within a single
+                        // attempt, so agent_type+attempt alone isn't unique
+                        // — include the array index and target to keep keys
+                        // stable and distinct.
+                        const stepKey = `${step.agent_type}-${step.attempt}-${step.target ?? ""}-${idx}`
                         return (
-                          <AccordionItem 
-                            key={`${step.agent_type}-${step.attempt}`}
-                            value={`${step.agent_type}-${step.attempt}`}
+                          <AccordionItem
+                            key={stepKey}
+                            value={stepKey}
                             className={cn(
                               "border border-neutral-200 dark:border-neutral-800",
                               isActive && "ring-2 ring-primary-500"
@@ -317,6 +323,11 @@ export default function AppDetailPage() {
                                 )} />
                                 <span className="font-medium text-neutral-900 dark:text-white">
                                   {agentInfo.label}
+                                  {step.agent_type === "code" && (
+                                    <span className="text-neutral-500 dark:text-neutral-400 font-normal">
+                                      {" — "}{step.target || "shared files"}
+                                    </span>
+                                  )}
                                 </span>
                                 {step.attempt > 1 && (
                                   <span className="px-1.5 py-0.5 text-xs bg-neutral-200 dark:bg-neutral-700 rounded">

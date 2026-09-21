@@ -2,6 +2,8 @@ package temporal_test
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 
 	apptemporal "github.com/arashrasoulzadeh/appgent/internal/temporal"
@@ -232,3 +234,59 @@ func TestGenerateAppWorkflow_PlanFails_StillPersists(t *testing.T) {
 type assertError string
 
 func (e assertError) Error() string { return string(e) }
+
+// TestGenerateAppWorkflow_CodeFansOutByPage verifies code generation is
+// split into one parallel call per page plus one for the shared/root files
+// (7 pages + 1 shared = 8 targets, batched in groups of 5 — this exercises
+// both the fan-out and the batching-loop boundary), and that every call's
+// Files get merged into the final CodeOutput without dropping any.
+func TestGenerateAppWorkflow_CodeFansOutByPage(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := newTestEnv(&suite)
+
+	pages := make([]apptemporal.PageSpec, 7)
+	for i := range pages {
+		pages[i] = apptemporal.PageSpec{Name: fmt.Sprintf("Page%d", i), Path: fmt.Sprintf("/page%d", i)}
+	}
+
+	env.OnActivity("PlanActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.PlanOutput{Pages: pages}, nil)
+	env.OnActivity("DesignActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.DesignOutput{}, nil)
+
+	var mu sync.Mutex
+	seenTargets := map[string]bool{}
+	env.OnActivity("CodeActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.CodeInput) (apptemporal.CodeOutput, error) {
+			key := "shared"
+			if in.TargetPage != nil {
+				key = in.TargetPage.Name
+			}
+			mu.Lock()
+			seenTargets[key] = true
+			mu.Unlock()
+			return apptemporal.CodeOutput{Files: map[string]string{key + ".tsx": "content-for-" + key}}, nil
+		})
+	env.OnActivity("QAActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.QAOutput{Passed: true}, nil)
+	env.OnActivity("PersistRunResultActivity", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(nil)
+
+	env.ExecuteWorkflow(apptemporal.GenerateAppWorkflow, newInput())
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	var result apptemporal.GenerateAppResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, "succeeded", result.Status)
+
+	// 1 shared target + 7 pages, none dropped across the batch-of-5 loop.
+	require.Len(t, seenTargets, 8)
+	require.True(t, seenTargets["shared"])
+	for _, p := range pages {
+		require.True(t, seenTargets[p.Name], "page %s should have gotten its own CodeActivity call", p.Name)
+	}
+
+	env.AssertExpectations(t)
+}

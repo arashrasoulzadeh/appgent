@@ -87,8 +87,11 @@ func (a *CodeAgent) Execute(ctx context.Context, in temporal.CodeInput) (tempora
 	for _, content := range files {
 		totalSize += len(content)
 	}
-	if totalSize > 2*1024*1024 {
-		return temporal.CodeOutput{}, fmt.Errorf("generated bundle too large: %d bytes (max 2MB)", totalSize)
+	// 500KB, not 2MB: each call now generates one page or the shared/root
+	// files, not the whole app, since code generation fans out in parallel
+	// (see GenerateAppWorkflow's generateCode helper).
+	if totalSize > 500*1024 {
+		return temporal.CodeOutput{}, fmt.Errorf("generated file(s) too large: %d bytes (max 500KB per call)", totalSize)
 	}
 
 	return temporal.CodeOutput{Files: files}, nil
