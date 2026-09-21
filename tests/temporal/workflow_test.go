@@ -291,12 +291,10 @@ func TestGenerateAppWorkflow_CodeFansOutByPage(t *testing.T) {
 	env.AssertExpectations(t)
 }
 
-// TestGenerateAppWorkflow_CodeFansOutByComponentAndPage verifies that
-// layout-type components (Header, Footer) each get their own parallel
-// CodeActivity call, same as pages, while a non-layout component (e.g. a
-// "ui" or "form" typed one) does NOT — those stay page-local by design, to
-// avoid multiple pages generating divergent copies of the same reusable
-// component independently.
+// TestGenerateAppWorkflow_CodeFansOutByComponentAndPage verifies that EVERY
+// component in the Plan spec's list — regardless of type (layout, ui, form,
+// ...) — gets its own parallel CodeActivity call, same as pages, so no
+// component is ever regenerated redundantly by multiple pages.
 func TestGenerateAppWorkflow_CodeFansOutByComponentAndPage(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := newTestEnv(&suite)
@@ -305,7 +303,7 @@ func TestGenerateAppWorkflow_CodeFansOutByComponentAndPage(t *testing.T) {
 	components := []apptemporal.ComponentSpec{
 		{Name: "Header", Type: "layout"},
 		{Name: "Footer", Type: "layout"},
-		{Name: "ProjectCard", Type: "ui"}, // not layout — must stay page-local
+		{Name: "ProjectCard", Type: "ui"}, // non-layout — still gets its own call
 	}
 
 	env.OnActivity("PlanActivity", mock.Anything, mock.Anything).
@@ -343,15 +341,76 @@ func TestGenerateAppWorkflow_CodeFansOutByComponentAndPage(t *testing.T) {
 	require.NoError(t, env.GetWorkflowResult(&result))
 	require.Equal(t, "succeeded", result.Status)
 
-	// shared + 2 layout components + 2 pages = 5 calls, NOT 6 — the
-	// non-layout "ProjectCard" component must not get its own call.
-	require.Len(t, seenTargets, 5)
+	// shared + 3 components (all types) + 2 pages = 6 calls.
+	require.Len(t, seenTargets, 6)
 	require.True(t, seenTargets["shared"])
 	require.True(t, seenTargets["component:Header"])
 	require.True(t, seenTargets["component:Footer"])
+	require.True(t, seenTargets["component:ProjectCard"], "non-layout components must also get their own call")
 	require.True(t, seenTargets["page:Home"])
 	require.True(t, seenTargets["page:About"])
-	require.False(t, seenTargets["component:ProjectCard"], "non-layout components must stay page-local, not get their own call")
+
+	env.AssertExpectations(t)
+}
+
+// TestGenerateAppWorkflow_CodeRetriesOnlyFailedTarget verifies that when one
+// concurrent CodeActivity call fails (after exhausting its own Temporal
+// RetryPolicy), only that ONE target is retried — other already-succeeded
+// or still in-flight targets are neither re-run nor discarded, and a
+// non-essential target failing after its extra retry doesn't fail the run.
+func TestGenerateAppWorkflow_CodeRetriesOnlyFailedTarget(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := newTestEnv(&suite)
+
+	pages := []apptemporal.PageSpec{{Name: "Home", Path: "/"}, {Name: "About", Path: "/about"}}
+
+	env.OnActivity("PlanActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.PlanOutput{Pages: pages}, nil)
+	env.OnActivity("DesignActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.DesignOutput{}, nil)
+
+	var mu sync.Mutex
+	callCounts := map[string]int{}
+	env.OnActivity("CodeActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.CodeInput) (apptemporal.CodeOutput, error) {
+			key := "shared"
+			switch {
+			case in.TargetPage != nil:
+				key = "page:" + in.TargetPage.Name
+			case in.TargetComponent != nil:
+				key = "component:" + in.TargetComponent.Name
+			}
+			mu.Lock()
+			callCounts[key]++
+			n := callCounts[key]
+			mu.Unlock()
+			if key == "page:About" && n == 1 {
+				return apptemporal.CodeOutput{}, fmt.Errorf("transient failure")
+			}
+			return apptemporal.CodeOutput{Files: map[string]string{key + ".tsx": "x"}}, nil
+		})
+	env.OnActivity("QAActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.QAOutput{Passed: true}, nil)
+	env.OnActivity("PersistRunResultActivity", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(nil)
+
+	env.ExecuteWorkflow(apptemporal.GenerateAppWorkflow, newInput())
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	var result apptemporal.GenerateAppResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, "succeeded", result.Status)
+
+	mu.Lock()
+	defer mu.Unlock()
+	// The failed target ("page:About") was retried exactly once more and
+	// succeeded on its second call. Every other target was called exactly
+	// once — a single failure never caused any other target to re-run.
+	require.Equal(t, 2, callCounts["page:About"])
+	require.Equal(t, 1, callCounts["page:Home"])
+	require.Equal(t, 1, callCounts["shared"])
 
 	env.AssertExpectations(t)
 }

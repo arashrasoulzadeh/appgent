@@ -221,23 +221,51 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 	}
 
 	// generateCode fans code generation out into one call per page, one per
-	// shared/layout component (Header, Footer, etc. — anything in the Plan
-	// spec's component list with Type == "layout"), plus one for the
-	// shared/root files (layout.tsx, config, globals.css, manifest/sw for
-	// pwa), run as parallel Temporal activities capped at maxParallelCode
-	// concurrent at a time, then merges every call's Files into one map.
-	// This replaces a single call that generated the whole app's file tree
-	// in one LLM response — smaller, focused calls are both faster (real
-	// concurrency) and safer (a single call producing truncated/invalid
-	// output only loses that one piece, not the entire run). Non-layout
-	// components (ui/form/etc.) are deliberately NOT split out here — they
-	// risk being generated inconsistently by multiple pages that each
-	// reference them, so those stay page-local, generated inline with
-	// whichever page(s) use them.
+	// component (ALL of them — layout, ui, form, section, whatever — each
+	// generated exactly once by its own dedicated call, never regenerated
+	// redundantly by multiple pages), plus one for the shared/root files
+	// (layout.tsx, config, globals.css, manifest/sw for pwa). This replaces
+	// a single call that generated the whole app's file tree in one LLM
+	// response — smaller, focused calls are both faster (real concurrency)
+	// and safer (a single call producing truncated/invalid output only
+	// loses that one piece, not the entire run).
+	//
+	// Concurrency is a rolling window of maxParallelCode, not
+	// batch-of-5-then-wait-for-all-5: as soon as any one call finishes, the
+	// next queued target starts immediately, rather than idling finished
+	// slots until the slowest call in the current batch finishes. This
+	// matters in practice — a free-tier model's per-call latency varies
+	// wildly (seen in production: anywhere from ~30s to several minutes),
+	// so a strict batch-wait-batch scheme means one slow call in a batch of
+	// 5 stalls the other 4 already-idle slots instead of picking up new
+	// work.
+	//
+	// Failure isolation: when one target's CodeActivity call fails (after
+	// exhausting codeCtx's own Temporal-level RetryPolicy), only THAT
+	// target is retried (up to maxTargetRetries extra full attempts) — the
+	// other in-flight/queued targets are never touched or re-run. If a
+	// non-essential target (a page or component) still fails after its
+	// retries, it's just skipped: the rest of the app still gets returned
+	// and generation continues, rather than discarding every other
+	// already-succeeded target and failing the whole run over one
+	// persistent failure. The shared/root target is the one exception — an
+	// app with no layout.tsx/package.json can't run at all, so its failure
+	// after retries is still treated as fatal for this call.
 	const maxParallelCode = 5
+	const maxTargetRetries = 1
 	type codeTarget struct {
 		page      *PageSpec
 		component *ComponentSpec
+	}
+	targetLabel := func(t codeTarget) string {
+		switch {
+		case t.page != nil:
+			return "page:" + t.page.Path
+		case t.component != nil:
+			return "component:" + t.component.Name
+		default:
+			return "shared/root"
+		}
 	}
 	generateCode := func(tokens *DesignTokens, priorFiles map[string]string, qaFeedback []QAIssue) (CodeOutput, error) {
 		codeAttempt++
@@ -247,9 +275,7 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 		targets = append(targets, codeTarget{}) // shared/root files
 		for i := range planOutput.Components {
 			c := planOutput.Components[i]
-			if c.Type == "layout" {
-				targets = append(targets, codeTarget{component: &c})
-			}
+			targets = append(targets, codeTarget{component: &c})
 		}
 		for i := range planOutput.Pages {
 			page := planOutput.Pages[i]
@@ -257,36 +283,89 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 		}
 
 		merged := make(map[string]string)
-		for start := 0; start < len(targets); start += maxParallelCode {
-			end := start + maxParallelCode
-			if end > len(targets) {
-				end = len(targets)
-			}
-			batch := targets[start:end]
+		var failedTargets []string
+		var firstErr error
+		targetRetries := make([]int, len(targets))
+		nextIdx := 0
+		inFlight := make(map[workflow.Future]int)
 
-			futures := make([]workflow.Future, len(batch))
-			for i, target := range batch {
-				futures[i] = workflow.ExecuteActivity(codeCtx, codeActivityName, CodeInput{
-					RunID:           in.RunID,
-					Attempt:         attempt,
-					Spec:            planOutput,
-					DesignTokens:    tokens,
-					PriorFiles:      priorFiles,
-					QAFeedback:      qaFeedback,
-					AppKind:         in.AppKind,
-					TargetPage:      target.page,
-					TargetComponent: target.component,
+		launchTarget := func(idx int) {
+			target := targets[idx]
+			f := workflow.ExecuteActivity(codeCtx, codeActivityName, CodeInput{
+				RunID:           in.RunID,
+				Attempt:         attempt,
+				Spec:            planOutput,
+				DesignTokens:    tokens,
+				PriorFiles:      priorFiles,
+				QAFeedback:      qaFeedback,
+				AppKind:         in.AppKind,
+				TargetPage:      target.page,
+				TargetComponent: target.component,
+			})
+			inFlight[f] = idx
+		}
+		launchNext := func() {
+			if nextIdx >= len(targets) {
+				return
+			}
+			idx := nextIdx
+			nextIdx++
+			launchTarget(idx)
+		}
+
+		for i := 0; i < maxParallelCode && i < len(targets); i++ {
+			launchNext()
+		}
+
+		for len(inFlight) > 0 {
+			selector := workflow.NewSelector(ctx)
+			for f, idx := range inFlight {
+				f, idx := f, idx
+				selector.AddFuture(f, func(f workflow.Future) {
+					delete(inFlight, f)
+					var out CodeOutput
+					if err := f.Get(ctx, &out); err != nil {
+						if targetRetries[idx] < maxTargetRetries {
+							targetRetries[idx]++
+							launchTarget(idx)
+							return
+						}
+						target := targets[idx]
+						if target.page == nil && target.component == nil {
+							// Shared/root files are load-bearing for the
+							// whole app — can't gracefully degrade without
+							// them, so this one failure IS fatal for the
+							// call. Other already in-flight targets are
+							// still allowed to finish/drain below; we just
+							// stop queuing new work.
+							if firstErr == nil {
+								firstErr = err
+							}
+							return
+						}
+						// Non-essential target exhausted its retries —
+						// skip it, keep the rest of the run going.
+						failedTargets = append(failedTargets, targetLabel(target))
+						launchNext()
+						return
+					}
+					for path, content := range out.Files {
+						merged[path] = content
+					}
+					if firstErr == nil {
+						launchNext()
+					}
 				})
 			}
-			for _, f := range futures {
-				var out CodeOutput
-				if err := f.Get(ctx, &out); err != nil {
-					return CodeOutput{}, err
-				}
-				for path, content := range out.Files {
-					merged[path] = content
-				}
-			}
+			selector.Select(ctx)
+		}
+
+		if firstErr != nil {
+			return CodeOutput{}, firstErr
+		}
+		if len(failedTargets) > 0 {
+			workflow.GetLogger(ctx).Warn("code generation: some targets failed after retries and were skipped",
+				"runID", in.RunID, "attempt", attempt, "failedTargets", failedTargets)
 		}
 		return CodeOutput{Files: merged}, nil
 	}
