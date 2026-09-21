@@ -1,8 +1,19 @@
 import { clsx, type ClassValue } from 'clsx'
 import { twMerge } from 'tailwind-merge'
+import { isAxiosError } from 'axios'
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
+}
+
+// Pulls a user-facing message out of an API error without resorting to
+// `any` — the backend's error shape is always `{ error: string }`.
+export function apiErrorMessage(err: unknown, fallback: string): string {
+  if (isAxiosError(err)) {
+    const data = err.response?.data as { error?: string } | undefined
+    if (data?.error) return data.error
+  }
+  return fallback
 }
 
 export function formatDate(date: Date | string): string {

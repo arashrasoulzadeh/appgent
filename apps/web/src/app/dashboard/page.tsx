@@ -1,10 +1,10 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { api, App } from "@/lib/api"
-import { formatDate, getInitials, cn } from "@/lib/utils"
-import { Plus, LogOut, LayoutDashboard, Settings, ChevronRight } from "lucide-react"
+import { formatDate, getInitials, cn, apiErrorMessage } from "@/lib/utils"
+import { Plus, LayoutDashboard } from "lucide-react"
 import Link from "next/link"
 
 // Keep in sync with services.MaxAppsPerUser (internal/services/app_service.go).
@@ -20,11 +20,7 @@ export default function DashboardPage() {
   const [error, setError] = useState("")
   const [loadError, setLoadError] = useState("")
 
-  useEffect(() => {
-    loadApps()
-  }, [])
-
-  const loadApps = async () => {
+  const loadApps = useCallback(async () => {
     setLoadError("")
     try {
       const { apps } = await api.getApps()
@@ -39,7 +35,13 @@ export default function DashboardPage() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [])
+
+  useEffect(() => {
+    // Standard data-fetch-on-mount pattern; loadApps' own setState calls are safe.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadApps()
+  }, [loadApps])
 
   const handleCreateApp = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -51,8 +53,8 @@ export default function DashboardPage() {
       setShowCreateModal(false)
       setCreateForm({ name: "", kind: "website", prompt: "" })
       router.push(`/dashboard/${app.id}`)
-    } catch (err: any) {
-      setError(err.response?.data?.error || "Failed to create app")
+    } catch (err) {
+      setError(apiErrorMessage(err, "Failed to create app"))
     } finally {
       setCreateLoading(false)
     }
@@ -120,7 +122,7 @@ export default function DashboardPage() {
 
         {apps.length >= MAX_APPS && (
           <div className="mb-6 p-4 bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 text-neutral-700 dark:text-neutral-300 rounded-lg text-sm">
-            You've reached the limit of {MAX_APPS} apps. Delete one to create another.
+            You&apos;ve reached the limit of {MAX_APPS} apps. Delete one to create another.
           </div>
         )}
 

@@ -1,22 +1,20 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { api, App, Run, AgentStep, Deployment } from "@/lib/api"
-import { formatDate, formatDateTime, truncate, cn } from "@/lib/utils"
-import { 
-  ChevronLeft, ChevronRight, Play, RotateCcw, 
-  ExternalLink, Download, AlertCircle, CheckCircle,
-  Loader2, XCircle, FileCode, Clock, Zap,
+import { formatDate, formatDateTime, truncate, cn, apiErrorMessage } from "@/lib/utils"
+import {
+  ChevronLeft, RotateCcw, CheckCircle,
+  Loader2, FileCode, Zap,
   Eye, Rocket, Settings, MessageSquare,
-  RefreshCw
 } from "lucide-react"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
 import { ConfirmDialog } from "@/components/ui/dialog"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from "@/components/ui/accordion"
-import { toast, useToast } from "@/hooks/use-toast"
+import { useToast } from "@/hooks/use-toast"
 
 const AGENT_LABELS: Record<string, { label: string; icon: React.ComponentType<{className?: string}> }> = {
   plan: { label: "Plan", icon: MessageSquare },
@@ -59,14 +57,33 @@ export default function AppDetailPage() {
   // the currently displayed app.
   const currentAppIdRef = useRef(appId)
 
-  useEffect(() => {
-    currentAppIdRef.current = appId
-    loadApp()
-    loadRuns()
-    loadDeployments()
+  const loadPreview = useCallback(async (runId: string, forAppId: string = appId) => {
+    try {
+      const { preview_url, expires_at } = await api.getPreviewUrl(forAppId, runId)
+      if (currentAppIdRef.current !== forAppId) return
+      setPreviewUrl(preview_url)
+      setPreviewExpiry(expires_at)
+    } catch (err) {
+      console.error("Failed to load preview:", err)
+    }
   }, [appId])
 
-  const loadApp = async () => {
+  const loadRunDetails = useCallback(async (runId: string, forAppId: string = appId) => {
+    try {
+      const { run, steps: stepsData } = await api.getRun(forAppId, runId)
+      if (currentAppIdRef.current !== forAppId) return
+      setSelectedRun(run)
+      setSteps(stepsData)
+
+      if (run.status === "succeeded" || run.status === "needs_review") {
+        loadPreview(runId, forAppId)
+      }
+    } catch (err) {
+      console.error("Failed to load run details:", err)
+    }
+  }, [appId, loadPreview])
+
+  const loadApp = useCallback(async () => {
     const requestedAppId = appId
     try {
       const { app: appData, latest_run } = await api.getApp(requestedAppId)
@@ -89,9 +106,9 @@ export default function AppDetailPage() {
         setLoading(false)
       }
     }
-  }
+  }, [appId, router, loadRunDetails])
 
-  const loadRuns = async () => {
+  const loadRuns = useCallback(async () => {
     const requestedAppId = appId
     try {
       const { runs: runsData } = await api.getRuns(requestedAppId)
@@ -100,24 +117,9 @@ export default function AppDetailPage() {
     } catch (err) {
       console.error("Failed to load runs:", err)
     }
-  }
+  }, [appId])
 
-  const loadRunDetails = async (runId: string, forAppId: string = appId) => {
-    try {
-      const { run, steps: stepsData } = await api.getRun(forAppId, runId)
-      if (currentAppIdRef.current !== forAppId) return
-      setSelectedRun(run)
-      setSteps(stepsData)
-
-      if (run.status === "succeeded" || run.status === "needs_review") {
-        loadPreview(runId, forAppId)
-      }
-    } catch (err) {
-      console.error("Failed to load run details:", err)
-    }
-  }
-
-  const loadDeployments = async () => {
+  const loadDeployments = useCallback(async () => {
     const requestedAppId = appId
     try {
       const { deployments: deps } = await api.getDeployments(requestedAppId)
@@ -126,18 +128,18 @@ export default function AppDetailPage() {
     } catch (err) {
       console.error("Failed to load deployments:", err)
     }
-  }
+  }, [appId])
 
-  const loadPreview = async (runId: string, forAppId: string = appId) => {
-    try {
-      const { preview_url, expires_at } = await api.getPreviewUrl(forAppId, runId)
-      if (currentAppIdRef.current !== forAppId) return
-      setPreviewUrl(preview_url)
-      setPreviewExpiry(expires_at)
-    } catch (err) {
-      console.error("Failed to load preview:", err)
-    }
-  }
+  useEffect(() => {
+    currentAppIdRef.current = appId
+    // Standard data-fetch-on-mount/on-appId-change pattern; each loader
+    // guards its setState calls behind currentAppIdRef so stale responses
+    // are dropped.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadApp()
+    loadRuns()
+    loadDeployments()
+  }, [appId, loadApp, loadRuns, loadDeployments])
 
   const handleRegenerate = async (e?: React.FormEvent) => {
     e?.preventDefault()
@@ -150,8 +152,8 @@ export default function AppDetailPage() {
       loadRunDetails(run.id)
       loadRuns()
       toast({ title: "Regeneration started", description: `Version ${run.version} is now queued` })
-    } catch (err: any) {
-      toast({ title: "Failed to regenerate", description: err.response?.data?.error || "Unknown error", variant: "destructive" })
+    } catch (err) {
+      toast({ title: "Failed to regenerate", description: apiErrorMessage(err, "Unknown error"), variant: "destructive" })
     } finally {
       setRegenerating(false)
     }
@@ -164,21 +166,10 @@ export default function AppDetailPage() {
       await api.deployApp(appId)
       loadDeployments()
       toast({ title: "Deployment started", description: "Check the Deployments tab for progress" })
-    } catch (err: any) {
-      toast({ title: "Failed to deploy", description: err.response?.data?.error || "Unknown error", variant: "destructive" })
+    } catch (err) {
+      toast({ title: "Failed to deploy", description: apiErrorMessage(err, "Unknown error"), variant: "destructive" })
     } finally {
       setDeploying(false)
-    }
-  }
-
-  const getStatusIcon = (status: string) => {
-    switch (status) {
-      case "succeeded": return <CheckCircle className="h-4 w-4 text-green-600" />
-      case "running": return <Loader2 className="h-4 w-4 text-yellow-600 animate-spin" />
-      case "queued": return <Clock className="h-4 w-4 text-neutral-600" />
-      case "needs_review": return <AlertCircle className="h-4 w-4 text-orange-600" />
-      case "failed": return <XCircle className="h-4 w-4 text-red-600" />
-      default: return <Clock className="h-4 w-4 text-neutral-600" />
     }
   }
 

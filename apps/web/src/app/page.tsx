@@ -8,9 +8,9 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
-import { toast, useToast } from "@/hooks/use-toast"
-import { Loader2, Zap, Code, LayoutDashboard, Sparkles } from "lucide-react"
-import { cn } from "@/lib/utils"
+import { useToast } from "@/hooks/use-toast"
+import { Loader2, Zap, Code, Sparkles } from "lucide-react"
+import { apiErrorMessage } from "@/lib/utils"
 
 export default function Home() {
   const router = useRouter()
@@ -26,8 +26,8 @@ export default function Home() {
       await api.login(email, password)
       toast({ title: "Welcome back!", description: "You have been logged in" })
       router.push("/dashboard")
-    } catch (err: any) {
-      toast({ title: "Login failed", description: err.response?.data?.error || "Invalid credentials", variant: "destructive" })
+    } catch (err) {
+      toast({ title: "Login failed", description: apiErrorMessage(err, "Invalid credentials"), variant: "destructive" })
     } finally {
       setLoading(false)
     }
