@@ -79,19 +79,8 @@ func (h *AppHandler) CreateApp(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"app": map[string]interface{}{
-			"id":      app.ID,
-			"name":    app.Name,
-			"slug":    app.Slug,
-			"kind":    app.Kind,
-			"status":  app.Status,
-			"created_at": app.CreatedAt,
-		},
-		"run": map[string]interface{}{
-			"id":     run.ID,
-			"version": run.Version,
-			"status": run.Status,
-		},
+		"app": app,
+		"run": run,
 	})
 }
 
@@ -210,11 +199,7 @@ func (h *AppHandler) RegenerateApp(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"run": map[string]interface{}{
-			"id":      run.ID,
-			"version": run.Version,
-			"status":  run.Status,
-		},
+		"run": run,
 	})
 }
 
