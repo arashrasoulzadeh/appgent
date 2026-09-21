@@ -164,7 +164,7 @@ export interface Run {
 }
 
 export interface AgentStep {
-  agent_type: 'plan' | 'design' | 'code' | 'qa'
+  agent_type: 'plan' | 'design' | 'code' | 'qa' | 'publish'
   attempt: number
   status: 'pending' | 'running' | 'succeeded' | 'failed'
   model_used: string

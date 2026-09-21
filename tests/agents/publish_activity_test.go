@@ -30,15 +30,15 @@ func (f *fakeProvisioner) Teardown(context.Context, uuid.UUID) error          { 
 // output, or to simulate a build failure.
 type fakeBuilder struct {
 	calls   []map[string]string
-	buildFn func(files map[string]string) (map[string]string, error)
+	buildFn func(files map[string]string) (map[string]string, string, error)
 }
 
-func (f *fakeBuilder) Build(_ context.Context, _ uuid.UUID, files map[string]string) (map[string]string, error) {
+func (f *fakeBuilder) Build(_ context.Context, _ uuid.UUID, files map[string]string) (map[string]string, string, error) {
 	f.calls = append(f.calls, files)
 	if f.buildFn != nil {
 		return f.buildFn(files)
 	}
-	return files, nil
+	return files, "", nil
 }
 
 func setFakes(t *testing.T, p *fakeProvisioner, b *fakeBuilder) {
@@ -103,7 +103,7 @@ func TestPublishBundleActivity_NoFiles(t *testing.T) {
 func TestPublishBundleActivity_Success(t *testing.T) {
 	fp := &fakeProvisioner{}
 	builtFiles := map[string]string{"index.html": "<html>built</html>"}
-	fb := &fakeBuilder{buildFn: func(map[string]string) (map[string]string, error) { return builtFiles, nil }}
+	fb := &fakeBuilder{buildFn: func(map[string]string) (map[string]string, string, error) { return builtFiles, "npm install...\nbuild succeeded", nil }}
 	setFakes(t, fp, fb)
 
 	runID := uuid.New()
@@ -122,8 +122,8 @@ func TestPublishBundleActivity_Success(t *testing.T) {
 
 func TestPublishBundleActivity_BuildError(t *testing.T) {
 	fp := &fakeProvisioner{}
-	fb := &fakeBuilder{buildFn: func(map[string]string) (map[string]string, error) {
-		return nil, fmt.Errorf("npm run build failed: exit code 1")
+	fb := &fakeBuilder{buildFn: func(map[string]string) (map[string]string, string, error) {
+		return nil, "npm ERR! ...", fmt.Errorf("npm run build failed: exit code 1")
 	}}
 	setFakes(t, fp, fb)
 

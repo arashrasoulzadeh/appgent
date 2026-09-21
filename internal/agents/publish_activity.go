@@ -28,24 +28,53 @@ func SetBuilder(b sandbox.BuildRunner) {
 	builder = b
 }
 
+// publishStepOutput is what gets stored in the "publish" agent_steps row's
+// output column — the build container's log is the main thing worth
+// showing here, since that's the only real diagnostic for a build failure
+// (npm/next errors from whatever the LLM generated).
+type publishStepOutput struct {
+	BundlePath string `json:"bundle_path,omitempty"`
+	BuildLog   string `json:"build_log,omitempty"`
+}
+
 func PublishBundleActivity(ctx context.Context, in temporal.PublishBundleInput) (temporal.PublishBundleOutput, error) {
+	// Tracked as its own "publish" agent_steps row, same as plan/design/
+	// code/qa, so the run-detail UI shows this step running (and its build
+	// log) instead of the run just appearing to hang between QA finishing
+	// and the run's final status landing — this step alone can take
+	// several minutes (npm install + next build).
+	stepID := startStep(ctx, in.RunID, "publish", 1, "docker-build", in)
+
 	if provisioner == nil {
-		return temporal.PublishBundleOutput{}, fmt.Errorf("provisioner not configured")
+		err := fmt.Errorf("provisioner not configured")
+		finishStep(ctx, stepID, nil, err)
+		return temporal.PublishBundleOutput{}, err
 	}
 	if builder == nil {
-		return temporal.PublishBundleOutput{}, fmt.Errorf("builder not configured")
+		err := fmt.Errorf("builder not configured")
+		finishStep(ctx, stepID, nil, err)
+		return temporal.PublishBundleOutput{}, err
 	}
 	if len(in.Files) == 0 {
-		return temporal.PublishBundleOutput{}, fmt.Errorf("no files to publish")
+		err := fmt.Errorf("no files to publish")
+		finishStep(ctx, stepID, nil, err)
+		return temporal.PublishBundleOutput{}, err
 	}
 
-	built, err := builder.Build(ctx, in.RunID, in.Files)
+	built, buildLog, err := builder.Build(ctx, in.RunID, in.Files)
 	if err != nil {
-		return temporal.PublishBundleOutput{}, fmt.Errorf("build: %w", err)
+		buildErr := fmt.Errorf("build: %w", err)
+		finishStep(ctx, stepID, publishStepOutput{BuildLog: buildLog}, buildErr)
+		return temporal.PublishBundleOutput{}, buildErr
 	}
 
 	if err := provisioner.Provision(ctx, in.RunID, built); err != nil {
-		return temporal.PublishBundleOutput{}, fmt.Errorf("provision bundle: %w", err)
+		provisionErr := fmt.Errorf("provision bundle: %w", err)
+		finishStep(ctx, stepID, publishStepOutput{BuildLog: buildLog}, provisionErr)
+		return temporal.PublishBundleOutput{}, provisionErr
 	}
-	return temporal.PublishBundleOutput{BundlePath: sandbox.RunPrefix(in.RunID)}, nil
+
+	bundlePath := sandbox.RunPrefix(in.RunID)
+	finishStep(ctx, stepID, publishStepOutput{BundlePath: bundlePath, BuildLog: buildLog}, nil)
+	return temporal.PublishBundleOutput{BundlePath: bundlePath}, nil
 }

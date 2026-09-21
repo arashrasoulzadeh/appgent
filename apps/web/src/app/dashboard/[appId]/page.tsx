@@ -21,6 +21,7 @@ const AGENT_LABELS: Record<string, { label: string; icon: React.ComponentType<{c
   design: { label: "Design", icon: Zap },
   code: { label: "Code", icon: FileCode },
   qa: { label: "QA", icon: CheckCircle },
+  publish: { label: "Publish (build + upload)", icon: Rocket },
 }
 
 const STATUS_COLORS: Record<string, string> = {

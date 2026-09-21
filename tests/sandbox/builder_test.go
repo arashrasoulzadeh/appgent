@@ -58,7 +58,7 @@ func TestBuild_Integration(t *testing.T) {
 		}`,
 	}
 
-	out, err := b.Build(context.Background(), uuid.New(), files)
+	out, _, err := b.Build(context.Background(), uuid.New(), files)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}

@@ -14,9 +14,13 @@ import (
 
 // BuildRunner builds a run's generated source into a static site. Extracted
 // as an interface so callers (internal/agents.PublishBundleActivity) can be
-// tested against a fake instead of actually shelling out to Docker.
+// tested against a fake instead of actually shelling out to Docker. The
+// returned log is the build container's combined stdout/stderr (npm
+// install + npm run build output) — returned on both success and failure
+// so it can be surfaced as the "publish" agent_steps row's output, not
+// just used for the error message on failure.
 type BuildRunner interface {
-	Build(ctx context.Context, runID uuid.UUID, files map[string]string) (map[string]string, error)
+	Build(ctx context.Context, runID uuid.UUID, files map[string]string) (built map[string]string, buildLog string, err error)
 }
 
 // Builder compiles a run's generated Next.js source into a static HTML/CSS/
@@ -55,9 +59,9 @@ func NewBuilder() *Builder {
 // Returns an error including the container's combined stdout/stderr on
 // build failure, since that's the only useful diagnostic for whatever the
 // LLM's generated code did wrong.
-func (b *Builder) Build(ctx context.Context, runID uuid.UUID, files map[string]string) (map[string]string, error) {
+func (b *Builder) Build(ctx context.Context, runID uuid.UUID, files map[string]string) (map[string]string, string, error) {
 	if _, err := exec.LookPath("docker"); err != nil {
-		return nil, fmt.Errorf("docker CLI not available in worker image: %w", err)
+		return nil, "", fmt.Errorf("docker CLI not available in worker image: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, b.Timeout)
@@ -65,11 +69,11 @@ func (b *Builder) Build(ctx context.Context, runID uuid.UUID, files map[string]s
 
 	stagingDir, err := os.MkdirTemp("", "appgent-build-in-"+runID.String())
 	if err != nil {
-		return nil, fmt.Errorf("create staging dir: %w", err)
+		return nil, "", fmt.Errorf("create staging dir: %w", err)
 	}
 	defer os.RemoveAll(stagingDir)
 	if err := writeFiles(stagingDir, files); err != nil {
-		return nil, fmt.Errorf("write staging files: %w", err)
+		return nil, "", fmt.Errorf("write staging files: %w", err)
 	}
 
 	containerName := "appgent-build-" + runID.String()
@@ -82,7 +86,7 @@ func (b *Builder) Build(ctx context.Context, runID uuid.UUID, files map[string]s
 		"sh", "-c", "npm install --no-audit --no-fund --loglevel=error && npm run build",
 	}
 	if out, err := exec.CommandContext(ctx, "docker", createArgs...).CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("docker create: %w: %s", err, out)
+		return nil, "", fmt.Errorf("docker create: %w: %s", err, out)
 	}
 	defer exec.Command("docker", "rm", "-f", containerName).Run()
 
@@ -90,32 +94,33 @@ func (b *Builder) Build(ctx context.Context, runID uuid.UUID, files map[string]s
 	// starts. The trailing "/." copies stagingDir's CONTENTS into /app,
 	// not stagingDir itself as a subdirectory of /app.
 	if out, err := exec.CommandContext(ctx, "docker", "cp", stagingDir+"/.", containerName+":/app").CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("docker cp in: %w: %s", err, out)
+		return nil, "", fmt.Errorf("docker cp in: %w: %s", err, out)
 	}
 
 	out, err := exec.CommandContext(ctx, "docker", "start", "-a", containerName).CombinedOutput()
+	buildLog := string(out)
 	if err != nil {
-		return nil, fmt.Errorf("build failed: %w\n%s", err, truncate(string(out), 4000))
+		return nil, buildLog, fmt.Errorf("build failed: %w\n%s", err, truncate(buildLog, 4000))
 	}
 
 	outputDir, err := os.MkdirTemp("", "appgent-build-out-"+runID.String())
 	if err != nil {
-		return nil, fmt.Errorf("create output dir: %w", err)
+		return nil, buildLog, fmt.Errorf("create output dir: %w", err)
 	}
 	defer os.RemoveAll(outputDir)
 
 	if cpOut, err := exec.CommandContext(ctx, "docker", "cp", containerName+":/app/"+b.OutputDir+"/.", outputDir).CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("docker cp out (build produced no %s/ directory — check next.config.js has output:'export'): %w: %s", b.OutputDir, err, cpOut)
+		return nil, buildLog, fmt.Errorf("docker cp out (build produced no %s/ directory — check next.config.js has output:'export'): %w: %s", b.OutputDir, err, cpOut)
 	}
 
 	built, err := readFiles(outputDir)
 	if err != nil {
-		return nil, fmt.Errorf("read built files: %w", err)
+		return nil, buildLog, fmt.Errorf("read built files: %w", err)
 	}
 	if len(built) == 0 {
-		return nil, fmt.Errorf("build produced zero files in %s/", b.OutputDir)
+		return nil, buildLog, fmt.Errorf("build produced zero files in %s/", b.OutputDir)
 	}
-	return built, nil
+	return built, buildLog, nil
 }
 
 func writeFiles(root string, files map[string]string) error {
