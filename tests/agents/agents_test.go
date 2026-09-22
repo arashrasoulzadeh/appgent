@@ -229,6 +229,42 @@ export default function Home() {
 	}
 }
 
+// TestCodeAgentExecute_WithQAFeedback is a regression test for a real
+// production bug: code.tmpl's QA Feedback section used `{{if .QAFeedback}}`
+// followed by `{{range .}}` — `{{if}}` doesn't change the template's `.`
+// context, so `{{range .}}` tried to range over the whole root CodeInput
+// struct (not a slice) instead of `.QAFeedback`, and Go's html/template
+// throws "range can't iterate over ..." at EXECUTE time. This crashed
+// every single QA-retry code generation in production whenever
+// QAFeedback was non-empty — the previous test above only covers the
+// QAFeedback-empty (first-pass) path, so it never caught this; this test
+// must exercise the real template with QAFeedback actually populated.
+func TestCodeAgentExecute_WithQAFeedback(t *testing.T) {
+	body := ">>>FILE: src/app/page.tsx\n" +
+		"export default function Home(){return null}\n" +
+		">>>ENDFILE"
+	srv := newJSONServer(t, body)
+	defer srv.Close()
+
+	provider := ai.NewOpenRouterProvider(ai.ProviderConfig{APIKey: "k", BaseURL: srv.URL})
+	agent, err := agents.NewCodeAgent(provider, "test-model", nil)
+	if err != nil {
+		t.Fatalf("NewCodeAgent: %v", err)
+	}
+
+	_, err = agent.Execute(context.Background(), temporal.CodeInput{
+		Spec:       temporal.PlanOutput{StyleDirection: "clean"},
+		AppKind:    "website",
+		PriorFiles: map[string]string{"src/app/page.tsx": "export default function Home() {}"},
+		QAFeedback: []temporal.QAIssue{
+			{File: "src/app/page.tsx", Line: 3, Severity: "blocking", Message: "Component 'X' is imported but was never generated."},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute with non-empty QAFeedback: %v (must not fail template execution)", err)
+	}
+}
+
 func TestCodeAgentExecute_BundleTooLarge(t *testing.T) {
 	// Build a delimited file block whose content exceeds the 500KB per-call
 	// cap enforced by CodeAgent.Execute.

@@ -96,7 +96,7 @@ Generate ONLY the shared/root files — do NOT generate any page route files or 
 
 ## QA Feedback (for retry):
 {{if .QAFeedback}}
-{{range .}}
+{{range .QAFeedback}}
 - **{{.File}}:{{.Line}}** [{{.Severity}}] {{.Message}}
 {{end}}
 {{else}}
