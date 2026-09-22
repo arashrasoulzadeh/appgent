@@ -529,9 +529,16 @@ func (s *AppService) GetRunWithSteps(ctx context.Context, userID, appID, runID u
 		return nil, nil, err
 	}
 
+	// ORDER BY created_at (not attempt, agent_type — that ordering isn't
+	// chronological at all: agent_type sorts alphabetically within each
+	// attempt, so a later "code" step could print before an earlier
+	// "design" step just because 'c' < 'd'). The frontend renders this
+	// list top-to-bottom with no client-side re-sort of its own, so the
+	// most recent event must be LAST here for the timeline to read newest-
+	// at-the-bottom, matching every other log/timeline UI convention.
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, run_id, agent_type, attempt, input, output, model_used, tokens_used, status, error, started_at, finished_at, created_at
-		FROM agent_steps WHERE run_id = $1 ORDER BY attempt, agent_type
+		FROM agent_steps WHERE run_id = $1 ORDER BY created_at ASC, id ASC
 	`, runID)
 	if err != nil {
 		return nil, nil, err

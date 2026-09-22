@@ -283,6 +283,56 @@ func TestAppService_GetRunWithSteps_CrossUser_Integration(t *testing.T) {
 	assert.ErrorIs(t, err, services.ErrRunNotFound, "GetRunWithSteps must not leak another user's run")
 }
 
+// TestAppService_GetRunWithSteps_OrdersByTimeNotAttemptOrType_Integration is
+// a regression test for a real ordering bug: the query used
+// "ORDER BY attempt, agent_type", which isn't chronological at all —
+// agent_type sorts alphabetically within an attempt, so a later "design"
+// step (attempt 1) could print AFTER an earlier "code" step from a
+// self-heal retry (attempt 2) just because attempt 2 > 1, or a later
+// "code" step could print before an earlier "design" step within the same
+// attempt because 'c' < 'd'. The frontend renders this list top-to-bottom
+// with no client-side re-sort, so steps must come back in actual
+// chronological (created_at) order, latest last.
+func TestAppService_GetRunWithSteps_OrdersByTimeNotAttemptOrType_Integration(t *testing.T) {
+	dsn := "postgres://appgent:appgent@localhost:5433/appgent?sslmode=disable"
+	ctx := context.Background()
+
+	pool, err := db.NewPool(ctx, dsn)
+	if err != nil {
+		t.Skipf("Database not available: %v", err)
+	}
+	defer pool.Close()
+
+	service := newTestAppService(t, pool)
+	userID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+
+	app, run, err := service.Create(ctx, userID, "Step Ordering Test", "website", "Test")
+	require.NoError(t, err)
+	defer service.Delete(ctx, userID, app.ID)
+
+	// Insert steps whose (attempt, agent_type) order is the OPPOSITE of
+	// their real chronological order — a "design" step from a later
+	// attempt inserted first (so it would sort first under the old query
+	// too, masking the bug), then a "code" step from an EARLIER attempt
+	// but a LATER real timestamp (the actual regression case: a self-heal
+	// repair round reusing attempt=1 after attempt=2 already ran).
+	insertStep := func(agentType string, attempt int) {
+		_, err := pool.Exec(ctx, `
+			INSERT INTO agent_steps (run_id, agent_type, attempt, input, model_used, status, created_at)
+			VALUES ($1, $2, $3, '{}', 'test-model', 'succeeded', clock_timestamp())
+		`, run.ID, agentType, attempt)
+		require.NoError(t, err)
+	}
+	insertStep("design", 2) // (attempt=2, type=design) — real order: 1st
+	insertStep("code", 1)   // (attempt=1, type=code) — real order: 2nd (would sort FIRST under the old "ORDER BY attempt, agent_type")
+
+	_, steps, err := service.GetRunWithSteps(ctx, userID, app.ID, run.ID)
+	require.NoError(t, err)
+	require.Len(t, steps, 2)
+	assert.Equal(t, "design", steps[0].AgentType, "the earliest-inserted step must come first regardless of its attempt/agent_type")
+	assert.Equal(t, "code", steps[1].AgentType, "the latest-inserted step must come LAST — the frontend has no client-side re-sort")
+}
+
 // TestAppService_GetPreviewURL_CrossUser_Integration guards against the IDOR
 // bug where GetPreviewURL's SQL query never filtered by the owning user.
 func TestAppService_GetPreviewURL_CrossUser_Integration(t *testing.T) {
