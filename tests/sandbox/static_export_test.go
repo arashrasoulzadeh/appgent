@@ -98,6 +98,51 @@ func TestPromote_Integration(t *testing.T) {
 	defer obj.Close()
 }
 
+// TestPromote_RemovesStaleFilesFromPreviousDeployment_Integration is a
+// regression test found during a full-flow audit: Promote copied the new
+// run's files over the live prefix but never removed files already live
+// from a PREVIOUS deployment that the new one doesn't produce — e.g. a page
+// removed between regenerations, or an orphaned Next.js build-id chunk
+// directory. Those stayed reachable at their old URLs forever.
+func TestPromote_RemovesStaleFilesFromPreviousDeployment_Integration(t *testing.T) {
+	p, client := newLiveProvisioner(t)
+	appID := uuid.New()
+	defer client.DeletePrefix(context.Background(), "test-bucket", sandbox.AppLivePrefix(appID))
+
+	firstRun := uuid.New()
+	if err := p.Provision(context.Background(), firstRun, map[string]string{
+		"index.html":       "v1",
+		"about/index.html": "about v1",
+	}); err != nil {
+		t.Fatalf("Provision (first run): %v", err)
+	}
+	defer client.DeletePrefix(context.Background(), "test-bucket", sandbox.RunPrefix(firstRun))
+	if err := p.Promote(context.Background(), appID, firstRun); err != nil {
+		t.Fatalf("Promote (first run): %v", err)
+	}
+
+	// Second run drops the "about" page entirely (e.g. removed by the user).
+	secondRun := uuid.New()
+	if err := p.Provision(context.Background(), secondRun, map[string]string{
+		"index.html": "v2",
+	}); err != nil {
+		t.Fatalf("Provision (second run): %v", err)
+	}
+	defer client.DeletePrefix(context.Background(), "test-bucket", sandbox.RunPrefix(secondRun))
+	if err := p.Promote(context.Background(), appID, secondRun); err != nil {
+		t.Fatalf("Promote (second run): %v", err)
+	}
+
+	if _, err := client.Download(context.Background(), "test-bucket", sandbox.AppLivePrefix(appID)+"about/index.html"); err == nil {
+		t.Error("expected about/index.html to be removed from the live prefix after a promote that no longer produces it, but it still exists")
+	}
+	obj, err := client.Download(context.Background(), "test-bucket", sandbox.AppLivePrefix(appID)+"index.html")
+	if err != nil {
+		t.Fatalf("Download index.html after second promote: %v", err)
+	}
+	defer obj.Close()
+}
+
 func TestPromote_NoPublishedRun_Integration(t *testing.T) {
 	p, _ := newLiveProvisioner(t)
 	// Promoting a run that was never provisioned has nothing to copy —

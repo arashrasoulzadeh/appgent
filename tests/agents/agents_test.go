@@ -3,11 +3,14 @@ package agents_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
 
 	"github.com/arashrasoulzadeh/appgent/internal/agents"
 	"github.com/arashrasoulzadeh/appgent/internal/ai"
@@ -355,5 +358,96 @@ func TestQAAgentExecute_ProviderError(t *testing.T) {
 	_, err = agent.Execute(context.Background(), temporal.QAInput{AppKind: "website"})
 	if err == nil {
 		t.Fatal("expected error when provider call fails")
+	}
+}
+
+// fakeBuildRunner lets tests control what QAAgent.Execute's real-build check
+// sees without shelling out to Docker.
+type fakeBuildRunner struct {
+	err      error
+	buildLog string
+}
+
+func (f *fakeBuildRunner) Build(_ context.Context, _ uuid.UUID, _ map[string]string) (map[string]string, string, error) {
+	if f.err != nil {
+		return nil, f.buildLog, f.err
+	}
+	return map[string]string{}, f.buildLog, nil
+}
+
+// TestQAAgentExecute_RealBuildFailure_SkipsLLMAndAttributesPerFile is a
+// regression test for a real production failure that reached "deploy" with
+// no warning: QAAgent.Execute never actually ran a build (or looked at
+// in.Files at all) before this fix — buildOutput was a hardcoded "succeeded"
+// string, so the LLM was told every check already passed regardless of what
+// was actually generated, and a "Module not found" build failure (missing
+// Header/Footer/ContactForm) only ever surfaced much later, silently, at
+// publish time. Now a real build runs first; on failure, the LLM call is
+// skipped entirely (deterministic, zero tokens) and per-file QAIssues are
+// synthesized from Next.js's standard error format so the retry loop can
+// actually route feedback to the right target.
+func TestQAAgentExecute_RealBuildFailure_SkipsLLMAndAttributesPerFile(t *testing.T) {
+	// No LLM server configured at all — if Execute tried to call the
+	// provider here, this would fail with a connection error, proving the
+	// real-build check short-circuits before ever reaching the LLM call.
+	provider := ai.NewOpenRouterProvider(ai.ProviderConfig{APIKey: "k", BaseURL: "http://127.0.0.1:1"})
+	agent, err := agents.NewQAAgent(provider, "test-model")
+	if err != nil {
+		t.Fatalf("NewQAAgent: %v", err)
+	}
+
+	buildLog := "./src/app/contact/page.tsx\n" +
+		"Module not found: Can't resolve '@/components/ContactForm'\n" +
+		"./src/app/layout.tsx\n" +
+		"Module not found: Can't resolve '@/components/Header'\n"
+	agents.SetBuilder(&fakeBuildRunner{err: fmt.Errorf("exit status 1"), buildLog: buildLog})
+	defer agents.SetBuilder(nil)
+
+	out, err := agent.Execute(context.Background(), temporal.QAInput{
+		AppKind: "website",
+		Files:   map[string]string{"src/app/contact/page.tsx": "..."},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if out.Passed {
+		t.Fatal("expected Passed=false on a real build failure")
+	}
+	if len(out.Issues) != 2 {
+		t.Fatalf("expected 2 per-file issues, got %d: %+v", len(out.Issues), out.Issues)
+	}
+	byFile := map[string]string{}
+	for _, issue := range out.Issues {
+		byFile[issue.File] = issue.Message
+	}
+	if !strings.Contains(byFile["src/app/contact/page.tsx"], "ContactForm") {
+		t.Errorf("expected contact page issue to mention ContactForm, got: %+v", out.Issues)
+	}
+	if !strings.Contains(byFile["src/app/layout.tsx"], "Header") {
+		t.Errorf("expected layout issue to mention Header, got: %+v", out.Issues)
+	}
+}
+
+// TestQAAgentExecute_NoBuilderConfigured_FallsBackToLLMPath keeps the
+// pre-existing behavior intact when SetBuilder was never called (e.g. these
+// other unit tests) or in.Files is empty — must not panic or error.
+func TestQAAgentExecute_NoBuilderConfigured_FallsBackToLLMPath(t *testing.T) {
+	qaJSON := `{"passed":true,"issues":[]}`
+	srv := newJSONServer(t, qaJSON)
+	defer srv.Close()
+
+	agents.SetBuilder(nil)
+	provider := ai.NewOpenRouterProvider(ai.ProviderConfig{APIKey: "k", BaseURL: srv.URL})
+	agent, err := agents.NewQAAgent(provider, "test-model")
+	if err != nil {
+		t.Fatalf("NewQAAgent: %v", err)
+	}
+
+	out, err := agent.Execute(context.Background(), temporal.QAInput{AppKind: "website"})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !out.Passed {
+		t.Errorf("expected Passed=true, got issues: %+v", out.Issues)
 	}
 }

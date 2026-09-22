@@ -124,10 +124,36 @@ func (p *StaticExportProvisioner) Promote(ctx context.Context, appID, runID uuid
 		return fmt.Errorf("run %s has no published files under %s", runID, srcPrefix)
 	}
 
+	newKeys := make(map[string]bool, len(objects))
 	for _, obj := range objects {
-		dstName := dstPrefix + obj.Key[len(srcPrefix):]
+		relKey := obj.Key[len(srcPrefix):]
+		newKeys[relKey] = true
+		dstName := dstPrefix + relKey
 		if err := p.storageClient.CopyObject(ctx, p.bucket, obj.Key, p.bucket, dstName); err != nil {
 			return fmt.Errorf("copy %s to %s: %w", obj.Key, dstName, err)
+		}
+	}
+
+	// Remove any file still live from a PREVIOUS deployment that this one
+	// no longer produces (e.g. a page was removed, or the Next.js static
+	// export's build-id-namespaced _next/static/<id>/... chunk directory
+	// changed) — without this, old/removed pages and orphaned chunks stay
+	// reachable at their old URLs forever, since copying above only
+	// overwrites same-named keys and never touches anything else already
+	// under dstPrefix. Done AFTER copying the new files (not before) so
+	// there's no window where the live site is briefly empty/broken if
+	// this promote fails partway through the copy loop above.
+	staleObjects, err := p.storageClient.ListObjects(ctx, p.bucket, dstPrefix)
+	if err != nil {
+		return fmt.Errorf("list destination objects: %w", err)
+	}
+	for _, obj := range staleObjects {
+		relKey := obj.Key[len(dstPrefix):]
+		if newKeys[relKey] {
+			continue
+		}
+		if err := p.storageClient.Delete(ctx, p.bucket, obj.Key); err != nil {
+			return fmt.Errorf("delete stale live file %s: %w", obj.Key, err)
 		}
 	}
 	return nil

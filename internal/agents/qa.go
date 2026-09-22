@@ -6,11 +6,57 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"text/template"
 
 	"github.com/arashrasoulzadeh/appgent/internal/ai"
 	"github.com/arashrasoulzadeh/appgent/internal/temporal"
 )
+
+// nextBuildErrorRe matches Next.js's standard webpack error format, where
+// the offending file path appears on its own line immediately before the
+// error description, e.g.:
+//
+//	./src/app/contact/page.tsx
+//	Module not found: Can't resolve '@/components/ContactForm'
+//
+// Used to attribute build failures to the specific file that caused them —
+// without a File on each QAIssue, code.tmpl's retry-pass rule ("if QA
+// feedback doesn't mention any file in your scope, return unchanged") means
+// no per-target call would ever recognize the feedback as its own to act on.
+var nextBuildErrorRe = regexp.MustCompile(`(?m)^\./(\S+)\n(.+)$`)
+
+// buildErrorIssues turns a raw `next build` failure log into per-file
+// QAIssues by matching nextBuildErrorRe. Falls back to a single
+// unattributed issue carrying the full log when the format doesn't match
+// (e.g. a config-level failure with no per-file breakdown) so the failure
+// is never silently dropped, even though an unattributed issue won't be
+// picked up by any single scoped retry target.
+func buildErrorIssues(buildErr error, buildLog string) []temporal.QAIssue {
+	matches := nextBuildErrorRe.FindAllStringSubmatch(buildLog, -1)
+	if len(matches) == 0 {
+		return []temporal.QAIssue{{
+			Severity: "blocking",
+			Message:  fmt.Sprintf("The generated app failed to build: %v\n\nBuild output:\n%s", buildErr, buildLog),
+		}}
+	}
+	seen := map[string]bool{}
+	var issues []temporal.QAIssue
+	for _, m := range matches {
+		file, msg := m[1], m[2]
+		key := file + "|" + msg
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		issues = append(issues, temporal.QAIssue{
+			File:     file,
+			Severity: "blocking",
+			Message:  fmt.Sprintf("Build failure in this file: %s", msg),
+		})
+	}
+	return issues
+}
 
 type QAAgent struct {
 	provider ai.Provider
@@ -35,6 +81,28 @@ func (a *QAAgent) Execute(ctx context.Context, in temporal.QAInput) (temporal.QA
 	linkOutput := "All internal links valid"
 	a11yOutput := "No a11y violations found"
 	pwaOutput := "Manifest and SW valid"
+
+	// Run the SAME real Docker build PublishBundleActivity will later run,
+	// before ever asking the LLM to review anything — this template is
+	// explicitly documented ("interpret the raw output from deterministic
+	// build/lint/a11y tools") to receive real tool output, but until now
+	// nothing ever ran a real build here: buildOutput was a hardcoded
+	// "succeeded" string regardless of what was actually generated. That
+	// let real build failures (e.g. "Module not found" for a component
+	// that silently failed to generate) pass QA and only surface much
+	// later, at publish time, with no chance to retry-with-feedback.
+	// builder is nil in unit tests that don't call SetBuilder and in
+	// in.Files == nil calls (nothing to build yet) — both fall back to the
+	// previous "assume it builds" behavior rather than erroring.
+	if builder != nil && len(in.Files) > 0 {
+		if _, buildLog, buildErr := builder.Build(ctx, in.RunID, in.Files); buildErr != nil {
+			// A real, deterministic build failure is unambiguous — no need
+			// to spend an LLM call asking it to "interpret" a failure that
+			// already has a definitive, structured answer. Same pattern as
+			// the missing-component-import structural check in workflow.go.
+			return temporal.QAOutput{Passed: false, Issues: buildErrorIssues(buildErr, buildLog)}, nil
+		}
+	}
 
 	var buf bytes.Buffer
 	err := a.prompt.Execute(&buf, map[string]interface{}{

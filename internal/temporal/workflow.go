@@ -4,12 +4,29 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 )
+
+// pageRouteMatcher returns a predicate matching the file(s) a page target's
+// own generated files live under, per code.tmpl's own rule: "Emit the route
+// file at `src/app{{.TargetPage.Path}}/page.tsx` (root path "/" →
+// `src/app/page.tsx`)", plus any truly page-local files alongside it. The
+// root route is matched exactly (not by prefix) since "src/app/" as a
+// prefix would also match every OTHER page's subdirectory
+// (e.g. "src/app/about/page.tsx") — a real collision the naive prefix form
+// would introduce.
+func pageRouteMatcher(path string) func(file string) bool {
+	if path == "/" {
+		return func(file string) bool { return file == "src/app/page.tsx" }
+	}
+	prefix := "src/app" + path + "/"
+	return func(file string) bool { return strings.HasPrefix(file, prefix) }
+}
 
 // componentImportRe matches `from "@/components/Name"` (or single quotes) —
 // used by findMissingComponentImports to catch a real, recurring class of
@@ -532,12 +549,33 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 							}
 							return
 						}
-						// A page target exhausted its retries — skip it,
-						// keep the rest of the run going. Nothing else in
-						// the generated app references a specific page by
-						// import, so a missing route degrades gracefully
-						// instead of breaking the build.
-						failedTargets = append(failedTargets, targetLabel(target))
+						// A page target exhausted its retries. If this is a
+						// QA-retry round (priorFiles set) and the page
+						// already built successfully in an earlier round,
+						// fall back to its last-known-good file(s) instead
+						// of silently dropping a working route — every call
+						// to generateCode regenerates ALL targets from
+						// scratch into a fresh `merged` map, so without this
+						// fallback a transient failure on ONE retry round
+						// would regress an already-working page to "route
+						// doesn't exist" with no error ever surfaced (page
+						// loss is deliberately treated as non-fatal). Only
+						// truly first-time failures (nothing to fall back
+						// to) degrade to "route skipped".
+						matchesRoute := pageRouteMatcher(target.page.Path)
+						var recovered bool
+						for path, content := range priorFiles {
+							if matchesRoute(path) {
+								merged[path] = content
+								recovered = true
+							}
+						}
+						if !recovered {
+							failedTargets = append(failedTargets, targetLabel(target))
+						} else {
+							workflow.GetLogger(ctx).Warn("code generation: page target failed this round, kept its last-known-good version",
+								"runID", in.RunID, "attempt", attempt, "page", target.page.Path)
+						}
 						launchNext()
 						return
 					}

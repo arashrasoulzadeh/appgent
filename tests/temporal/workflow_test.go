@@ -911,6 +911,88 @@ func TestGenerateAppWorkflow_PlannedComponentNeverGenerated_SelfHeals(t *testing
 	env.AssertExpectations(t)
 }
 
+// TestGenerateAppWorkflow_PageFailsOnRetryRound_KeepsLastKnownGoodVersion is
+// a regression test for a bug found during a full-flow audit: every call to
+// generateCode (initial pass, design-token pass, each QA-retry pass)
+// regenerates ALL targets from scratch into a fresh, empty `merged` map —
+// it's never seeded from priorFiles. If a page's CodeActivity call
+// transiently fails and exhausts its retries during a LATER round (e.g. the
+// QA-retry round fixing a different page), that page was silently dropped
+// from the published bundle even though it built successfully in an
+// earlier round — a working route regressing to "doesn't exist" with no
+// error ever surfaced, since page failures are deliberately non-fatal.
+func TestGenerateAppWorkflow_PageFailsOnRetryRound_KeepsLastKnownGoodVersion(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := newTestEnv(&suite)
+
+	env.OnActivity("PlanActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.PlanOutput{Pages: []apptemporal.PageSpec{
+			{Name: "Home", Path: "/"},
+			{Name: "About", Path: "/about"},
+		}}, nil)
+	env.OnActivity("DesignActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.DesignOutput{}, nil)
+
+	env.OnActivity("CodeActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.CodeInput) (apptemporal.CodeOutput, error) {
+			switch {
+			case in.TargetPage != nil && in.TargetPage.Name == "Home":
+				content := "home v1"
+				if in.Attempt >= 2 {
+					content = "home v2 fixed"
+				}
+				return apptemporal.CodeOutput{Files: map[string]string{"src/app/page.tsx": content}}, nil
+			case in.TargetPage != nil && in.TargetPage.Name == "About":
+				if in.Attempt >= 2 {
+					// Built fine on attempt 1; fails every time from the
+					// QA-retry round onward (both the round's initial try
+					// and its one in-round retry), simulating a transient
+					// failure unrelated to About itself.
+					return apptemporal.CodeOutput{}, fmt.Errorf("transient provider error")
+				}
+				return apptemporal.CodeOutput{Files: map[string]string{"src/app/about/page.tsx": "about v1"}}, nil
+			default:
+				return apptemporal.CodeOutput{Files: map[string]string{"shared.tsx": "export {}"}}, nil
+			}
+		})
+
+	var qaCalls int
+	env.OnActivity("QAActivity", mock.Anything, mock.Anything).
+		Return(func(context.Context, apptemporal.QAInput) (apptemporal.QAOutput, error) {
+			qaCalls++
+			if qaCalls == 1 {
+				return apptemporal.QAOutput{Passed: false, Issues: []apptemporal.QAIssue{
+					{File: "src/app/page.tsx", Severity: "blocking", Message: "fix home"},
+				}}, nil
+			}
+			return apptemporal.QAOutput{Passed: true}, nil
+		})
+
+	var publishedFiles map[string]string
+	env.OnActivity("PublishBundleActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.PublishBundleInput) (apptemporal.PublishBundleOutput, error) {
+			publishedFiles = in.Files
+			return apptemporal.PublishBundleOutput{BundlePath: "runs/" + in.RunID.String() + "/"}, nil
+		})
+	env.OnActivity("PersistRunResultActivity", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(nil)
+
+	env.ExecuteWorkflow(apptemporal.GenerateAppWorkflow, newInput())
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	var result apptemporal.GenerateAppResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, "succeeded", result.Status)
+
+	require.Equal(t, "home v2 fixed", publishedFiles["src/app/page.tsx"])
+	require.Equal(t, "about v1", publishedFiles["src/app/about/page.tsx"],
+		"About built successfully in round 1 — a transient failure regenerating it during the QA-retry round must not drop it from the published bundle")
+
+	env.AssertExpectations(t)
+}
+
 // TestGenerateAppWorkflow_MissingComponentImport_StubbedAsLastResort covers
 // the case the self-heal retry loop alone can't guarantee: the LLM keeps
 // regenerating the exact same hallucinated "@/components/GhostThing"
