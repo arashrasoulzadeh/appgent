@@ -3,6 +3,7 @@ package temporal_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -828,6 +829,71 @@ func TestRedeployWorkflow_BuildFailure_RepairsViaMissingComponent_ThenSucceeds(t
 	require.Equal(t, "live", result.Status)
 	require.Greater(t, buildCalls, 1, "must retry the build after repairing, not just once (exact count includes Temporal's own activity-level retries, not just this repair loop's rounds)")
 	require.Contains(t, publishedSource, "src/components/Header.tsx", "the repaired source must be persisted so it isn't lost/repeated next time")
+
+	env.AssertExpectations(t)
+}
+
+// TestRedeployWorkflow_BuildFailure_RepairsViaTypeScriptError_ThenSucceeds
+// is a regression test for a parsing bug found live in production: a
+// TypeScript type-check error's file line has a ":line:col" suffix (e.g.
+// "./src/app/education/page.tsx:10:8"), unlike a webpack "Module not
+// found" error's plain file line. The build-log parser was capturing that
+// whole suffix as part of the "file", which then never matched any real
+// page path — silently defeating repair for this whole class of error (a
+// JSX tag used without its import, a real and fixable bug, NOT the
+// missing-component pattern the OTHER repair path already covers).
+func TestRedeployWorkflow_BuildFailure_RepairsViaTypeScriptError_ThenSucceeds(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := newTestEnv(&suite)
+
+	savedSource := map[string]string{
+		"src/app/education/page.tsx": "export default function Education() { return <EducationSection /> }",
+	}
+	spec := apptemporal.PlanOutput{
+		Pages: []apptemporal.PageSpec{{Name: "Education", Path: "/education"}},
+	}
+	env.OnActivity("FetchRunSourceActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.FetchRunSourceOutput{Files: savedSource, Spec: spec, AppKind: "website"}, nil)
+
+	var buildCalls int
+	env.OnActivity("PublishBundleActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.PublishBundleInput) (apptemporal.PublishBundleOutput, error) {
+			buildCalls++
+			if strings.Contains(in.Files["src/app/education/page.tsx"], "import EducationSection") {
+				return apptemporal.PublishBundleOutput{BundlePath: "runs/" + in.RunID.String() + "/"}, nil
+			}
+			return apptemporal.PublishBundleOutput{}, assertError(
+				"build: build failed: exit status 1\n./src/app/education/page.tsx:10:8\nType error: Cannot find name 'EducationSection'.\n")
+		})
+
+	env.OnActivity("CodeActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.CodeInput) (apptemporal.CodeOutput, error) {
+			require.NotNil(t, in.TargetPage, "repair call must be scoped to the page the TS error was attributed to")
+			require.Equal(t, "/education", in.TargetPage.Path)
+			require.Len(t, in.QAFeedback, 1)
+			require.Equal(t, "src/app/education/page.tsx", in.QAFeedback[0].File, "the :line:col suffix must be stripped or this would never match the page's real path")
+			require.Contains(t, in.QAFeedback[0].Message, "EducationSection")
+			return apptemporal.CodeOutput{Files: map[string]string{
+				"src/app/education/page.tsx": "import EducationSection from \"@/components/EducationSection\"\nexport default function Education() { return <EducationSection /> }",
+			}}, nil
+		})
+
+	env.OnActivity("PublishSourceActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.PublishSourceOutput{SourcePath: "sources/x/"}, nil)
+	env.OnActivity("UpdateRunBundlePathActivity", mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity("PromoteDeploymentActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.PromoteDeploymentOutput{URL: "/api/v1/apps/x/live/index.html"}, nil)
+
+	in := newRedeployInput(true)
+	env.ExecuteWorkflow(apptemporal.RedeployWorkflow, in)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	var result apptemporal.RedeployResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, "live", result.Status)
+	require.Greater(t, buildCalls, 1)
 
 	env.AssertExpectations(t)
 }

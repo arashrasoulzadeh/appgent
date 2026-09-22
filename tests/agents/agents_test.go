@@ -433,6 +433,50 @@ func TestQAAgentExecute_RealBuildFailure_SkipsLLMAndAttributesPerFile(t *testing
 	}
 }
 
+// TestQAAgentExecute_TypeScriptError_StripsLineColFromFilePath is a
+// regression test for a real production failure: Next.js's TypeScript
+// checker (as opposed to its webpack module-resolution errors) appends
+// ":line:col" directly onto the file path on that same line, e.g.
+// "./src/app/education/page.tsx:10:8" — the parser was capturing that
+// whole string (including ":10:8") as the "file", which then could never
+// match a real page/component path in the retry-attribution logic,
+// silently defeating self-heal for this whole class of error (a used-but-
+// never-imported component — "Cannot find name 'X'" — which is a
+// perfectly real, fixable bug, distinct from the actual missing-file/
+// missing-tsconfig-alias issues chased earlier this session).
+func TestQAAgentExecute_TypeScriptError_StripsLineColFromFilePath(t *testing.T) {
+	provider := ai.NewOpenRouterProvider(ai.ProviderConfig{APIKey: "k", BaseURL: "http://127.0.0.1:1"})
+	agent, err := agents.NewQAAgent(provider, "test-model")
+	if err != nil {
+		t.Fatalf("NewQAAgent: %v", err)
+	}
+
+	buildLog := "./src/app/education/page.tsx:10:8\n" +
+		"Type error: Cannot find name 'EducationSection'.\n"
+	agents.SetBuilder(&fakeBuildRunner{err: fmt.Errorf("exit status 1"), buildLog: buildLog})
+	defer agents.SetBuilder(nil)
+
+	out, err := agent.Execute(context.Background(), temporal.QAInput{
+		AppKind: "website",
+		Files:   map[string]string{"src/app/education/page.tsx": "..."},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if out.Passed {
+		t.Fatal("expected Passed=false on a real build failure")
+	}
+	if len(out.Issues) != 1 {
+		t.Fatalf("expected 1 issue, got %d: %+v", len(out.Issues), out.Issues)
+	}
+	if out.Issues[0].File != "src/app/education/page.tsx" {
+		t.Errorf("File = %q, want the clean path with no :line:col suffix", out.Issues[0].File)
+	}
+	if !strings.Contains(out.Issues[0].Message, "EducationSection") {
+		t.Errorf("expected issue to mention EducationSection, got: %+v", out.Issues[0])
+	}
+}
+
 // TestQAAgentExecute_NoBuilderConfigured_FallsBackToLLMPath keeps the
 // pre-existing behavior intact when SetBuilder was never called (e.g. these
 // other unit tests) or in.Files is empty — must not panic or error.

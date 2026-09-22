@@ -100,13 +100,22 @@ func findMissingComponentImportsByFile(files map[string]string) map[string][]str
 	return byFile
 }
 
-// nextBuildFileErrorRe matches Next.js's standard webpack error format,
-// where the offending file path appears on its own line immediately before
-// the error description — see internal/agents/qa.go's identical parser
-// (duplicated here rather than shared, since internal/temporal cannot
-// import internal/agents without an import cycle: agents already imports
-// temporal for its input/output types).
+// nextBuildFileErrorRe matches Next.js's standard webpack/TypeScript error
+// format, where the offending file path appears on its own line
+// immediately before the error description — see internal/agents/qa.go's
+// identical parser (duplicated here rather than shared, since
+// internal/temporal cannot import internal/agents without an import
+// cycle: agents already imports temporal for its input/output types). The
+// TypeScript-checker shape appends ":line:col" to the file path on that
+// same line (e.g. "./src/app/education/page.tsx:10:8") — stripped by
+// cleanBuildErrorFilePath so it resolves to a clean, matchable path.
 var nextBuildFileErrorRe = regexp.MustCompile(`(?m)^\./(\S+)\n(.+)$`)
+
+var trailingLineColRe = regexp.MustCompile(`:\d+:\d+$`)
+
+func cleanBuildErrorFilePath(file string) string {
+	return trailingLineColRe.ReplaceAllString(file, "")
+}
 
 // parseBuildLogFileIssues turns a raw `next build` failure log (or, since
 // sandbox.Builder embeds the log directly into its returned error, a
@@ -118,7 +127,7 @@ func parseBuildLogFileIssues(buildErrMsg string) []QAIssue {
 	seen := map[string]bool{}
 	var issues []QAIssue
 	for _, m := range matches {
-		file, msg := m[1], m[2]
+		file, msg := cleanBuildErrorFilePath(m[1]), m[2]
 		key := file + "|" + msg
 		if seen[key] {
 			continue

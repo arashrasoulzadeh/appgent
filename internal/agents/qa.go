@@ -13,18 +13,36 @@ import (
 	"github.com/arashrasoulzadeh/appgent/internal/temporal"
 )
 
-// nextBuildErrorRe matches Next.js's standard webpack error format, where
-// the offending file path appears on its own line immediately before the
-// error description, e.g.:
+// nextBuildErrorRe matches Next.js's standard webpack/TypeScript error
+// format, where the offending file path appears on its own line
+// immediately before the error description. Two real shapes seen in
+// production:
 //
 //	./src/app/contact/page.tsx
 //	Module not found: Can't resolve '@/components/ContactForm'
+//
+//	./src/app/education/page.tsx:10:8
+//	Type error: Cannot find name 'EducationSection'.
+//
+// The TypeScript-checker shape appends ":line:col" directly to the file
+// path on that same line — captured here and stripped in Go (a regex
+// alternation for "optionally followed by :digits:digits" is uglier than
+// just trimming it after the fact) so both shapes resolve to a clean file
+// path a page/component target can actually be matched against.
 //
 // Used to attribute build failures to the specific file that caused them —
 // without a File on each QAIssue, code.tmpl's retry-pass rule ("if QA
 // feedback doesn't mention any file in your scope, return unchanged") means
 // no per-target call would ever recognize the feedback as its own to act on.
 var nextBuildErrorRe = regexp.MustCompile(`(?m)^\./(\S+)\n(.+)$`)
+
+// trailingLineColRe strips a TypeScript-checker-style ":line:col" suffix
+// (e.g. ":10:8") off the end of a file path captured by nextBuildErrorRe.
+var trailingLineColRe = regexp.MustCompile(`:\d+:\d+$`)
+
+func cleanBuildErrorFilePath(file string) string {
+	return trailingLineColRe.ReplaceAllString(file, "")
+}
 
 // buildErrorIssues turns a raw `next build` failure log into per-file
 // QAIssues by matching nextBuildErrorRe. Falls back to a single
@@ -43,7 +61,7 @@ func buildErrorIssues(buildErr error, buildLog string) []temporal.QAIssue {
 	seen := map[string]bool{}
 	var issues []temporal.QAIssue
 	for _, m := range matches {
-		file, msg := m[1], m[2]
+		file, msg := cleanBuildErrorFilePath(m[1]), m[2]
 		key := file + "|" + msg
 		if seen[key] {
 			continue
