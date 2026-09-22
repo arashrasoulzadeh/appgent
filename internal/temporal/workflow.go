@@ -680,6 +680,7 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 				files = append(files, path)
 			}
 			sort.Strings(files)
+			missingNamed := map[string]bool{}
 			for _, path := range files {
 				for _, name := range byFile[path] {
 					issues = append(issues, QAIssue{
@@ -690,7 +691,47 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 							name, name, name,
 						),
 					})
+					missingNamed[name] = true
 				}
+			}
+			// The issues above are addressed to the file(s) that IMPORT the
+			// missing component — but per code.tmpl's scoping rules, only
+			// the component's OWN generation call (TargetComponent == name)
+			// is allowed to emit src/components/<name>.tsx, and that call
+			// only acts on feedback that names ITS OWN file. Without an
+			// issue whose File is the component's own path, nobody is ever
+			// actually told to create it: the importer's call sees the
+			// feedback but is out of scope to emit a component file, and
+			// the component's own call never sees feedback naming itself,
+			// so it just returns its (nonexistent) file "unchanged" — a
+			// real production case (Header/Footer/ContactForm all silently
+			// missing from a build despite self-heal supposedly running).
+			plannedComponents := map[string]bool{}
+			for _, c := range planOutput.Components {
+				plannedComponents[c.Name] = true
+			}
+			var missingNames []string
+			for name := range missingNamed {
+				// Only names that are actually in the Plan spec's component
+				// list have a TargetComponent generation call to receive
+				// this issue at all — a fully invented name (never planned)
+				// has no such call, so the only fix possible is the
+				// importer removing the reference, which the issue above
+				// already asks for.
+				if plannedComponents[name] {
+					missingNames = append(missingNames, name)
+				}
+			}
+			sort.Strings(missingNames)
+			for _, name := range missingNames {
+				issues = append(issues, QAIssue{
+					File:     "src/components/" + name + ".tsx",
+					Severity: "blocking",
+					Message: fmt.Sprintf(
+						"This component is imported elsewhere in the app but was never generated. Generate src/components/%s.tsx now, exporting a component named %s with a generic/reusable props interface.",
+						name, name,
+					),
+				})
 			}
 			qaOutput = QAOutput{Passed: false, Issues: issues}
 		} else {

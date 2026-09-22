@@ -841,6 +841,76 @@ func TestGenerateAppWorkflow_MissingComponentImport_SelfHeals(t *testing.T) {
 	env.AssertExpectations(t)
 }
 
+// TestGenerateAppWorkflow_PlannedComponentNeverGenerated_SelfHeals is a
+// regression test for a real production build failure distinct from the
+// GhostThing case above: "Header" WAS in the Plan spec's component list (so
+// it has its own TargetComponent generation call), but that call kept
+// returning no file for it, while Home.tsx (a separate target) correctly
+// imported "@/components/Header" per the spec. The self-heal QAIssue was
+// previously addressed only to Home.tsx (the importer) — but per code.tmpl's
+// scoping rules, Home.tsx's call is out of scope to ever emit
+// src/components/Header.tsx itself, and the Header component's OWN call
+// never saw feedback naming ITS file, so it kept silently returning nothing.
+// Nobody was ever actually told to generate Header. The fix adds a second
+// issue addressed to src/components/Header.tsx itself.
+func TestGenerateAppWorkflow_PlannedComponentNeverGenerated_SelfHeals(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := newTestEnv(&suite)
+
+	env.OnActivity("PlanActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.PlanOutput{
+			Pages:      []apptemporal.PageSpec{{Name: "Home", Path: "/"}},
+			Components: []apptemporal.ComponentSpec{{Name: "Header", Type: "layout"}},
+		}, nil)
+	env.OnActivity("DesignActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.DesignOutput{}, nil)
+
+	var headerCallSawOwnFeedback bool
+	env.OnActivity("CodeActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.CodeInput) (apptemporal.CodeOutput, error) {
+			switch {
+			case in.TargetPage != nil && in.TargetPage.Name == "Home":
+				return apptemporal.CodeOutput{Files: map[string]string{
+					"Home.tsx": `import Header from "@/components/Header"`,
+				}}, nil
+			case in.TargetComponent != nil && in.TargetComponent.Name == "Header":
+				for _, issue := range in.QAFeedback {
+					if issue.File == "src/components/Header.tsx" {
+						headerCallSawOwnFeedback = true
+					}
+				}
+				if in.Attempt == 1 {
+					// First pass: the model never emits itself at all.
+					return apptemporal.CodeOutput{Files: map[string]string{}}, nil
+				}
+				// Retry pass: now that it's been told (correctly scoped),
+				// it actually generates itself.
+				return apptemporal.CodeOutput{Files: map[string]string{
+					"src/components/Header.tsx": "export default function Header() { return null }",
+				}}, nil
+			default:
+				return apptemporal.CodeOutput{Files: map[string]string{"shared.tsx": "export {}"}}, nil
+			}
+		})
+
+	env.OnActivity("QAActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.QAOutput{Passed: true}, nil)
+	env.OnActivity("PersistRunResultActivity", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(nil)
+
+	env.ExecuteWorkflow(apptemporal.GenerateAppWorkflow, newInput())
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	var result apptemporal.GenerateAppResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, "succeeded", result.Status)
+	require.True(t, headerCallSawOwnFeedback, "Header's own generation call must see feedback naming its own file, or it has no reason to ever generate itself")
+
+	env.AssertExpectations(t)
+}
+
 // TestGenerateAppWorkflow_MissingComponentImport_StubbedAsLastResort covers
 // the case the self-heal retry loop alone can't guarantee: the LLM keeps
 // regenerating the exact same hallucinated "@/components/GhostThing"
