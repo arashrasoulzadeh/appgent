@@ -2,6 +2,7 @@ package agents
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/arashrasoulzadeh/appgent/internal/sandbox"
@@ -48,9 +49,13 @@ func PublishSourceActivity(ctx context.Context, in temporal.PublishSourceInput) 
 	return temporal.PublishSourceOutput{SourcePath: sandbox.SourcePrefix(in.RunID)}, nil
 }
 
-// FetchRunSourceActivity retrieves a run's previously saved raw source, for
-// RedeployWorkflow to rebuild from without asking the LLM to regenerate
-// anything.
+// FetchRunSourceActivity retrieves a run's previously saved raw source,
+// plus its original Plan spec and app kind, for RedeployWorkflow to rebuild
+// from without asking the LLM to regenerate anything up front — and, if the
+// rebuild's real build fails, to repair via a correctly-scoped CodeActivity
+// call using that same spec. Spec is the zero value for runs generated
+// before the spec column existed; RedeployWorkflow treats that as "no
+// repair possible" and falls back to its pre-existing behavior.
 func FetchRunSourceActivity(ctx context.Context, in temporal.FetchRunSourceInput) (temporal.FetchRunSourceOutput, error) {
 	if provisioner == nil {
 		return temporal.FetchRunSourceOutput{}, fmt.Errorf("provisioner not configured")
@@ -59,7 +64,29 @@ func FetchRunSourceActivity(ctx context.Context, in temporal.FetchRunSourceInput
 	if err != nil {
 		return temporal.FetchRunSourceOutput{}, fmt.Errorf("fetch source: %w", err)
 	}
-	return temporal.FetchRunSourceOutput{Files: files}, nil
+
+	out := temporal.FetchRunSourceOutput{Files: files}
+	if dbPool == nil {
+		return out, nil
+	}
+	var specJSON []byte
+	var appKind string
+	err = dbPool.QueryRow(ctx, `
+		SELECT gr.spec, a.kind
+		FROM generation_runs gr
+		JOIN apps a ON a.id = gr.app_id
+		WHERE gr.id = $1
+	`, in.RunID).Scan(&specJSON, &appKind)
+	if err != nil {
+		// Non-fatal: RedeployWorkflow just won't be able to repair a build
+		// failure for this run, same as if the spec column were unset.
+		return out, nil
+	}
+	out.AppKind = appKind
+	if len(specJSON) > 0 {
+		_ = json.Unmarshal(specJSON, &out.Spec)
+	}
+	return out, nil
 }
 
 // publishStepOutput is what gets stored in the "publish" agent_steps row's

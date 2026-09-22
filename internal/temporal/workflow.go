@@ -12,6 +12,15 @@ import (
 	"go.temporal.io/sdk/workflow"
 )
 
+// codeTarget scopes a single CodeActivity call to exactly one page, one
+// component, or (both nil) the shared/root files — package-level so both
+// GenerateAppWorkflow's parallel fan-out and RedeployWorkflow's build-
+// failure repair loop can share it.
+type codeTarget struct {
+	page      *PageSpec
+	component *ComponentSpec
+}
+
 // pageRouteMatcher returns a predicate matching the file(s) a page target's
 // own generated files live under, per code.tmpl's own rule: "Emit the route
 // file at `src/app{{.TargetPage.Path}}/page.tsx` (root path "/" →
@@ -91,6 +100,170 @@ func findMissingComponentImportsByFile(files map[string]string) map[string][]str
 	return byFile
 }
 
+// nextBuildFileErrorRe matches Next.js's standard webpack error format,
+// where the offending file path appears on its own line immediately before
+// the error description — see internal/agents/qa.go's identical parser
+// (duplicated here rather than shared, since internal/temporal cannot
+// import internal/agents without an import cycle: agents already imports
+// temporal for its input/output types).
+var nextBuildFileErrorRe = regexp.MustCompile(`(?m)^\./(\S+)\n(.+)$`)
+
+// parseBuildLogFileIssues turns a raw `next build` failure log (or, since
+// sandbox.Builder embeds the log directly into its returned error, a
+// PublishBundleActivity error string) into per-file QAIssues, for build
+// failures the deterministic missing-component check doesn't already
+// explain (a real TypeScript error, a syntax error, a bad export, etc.).
+func parseBuildLogFileIssues(buildErrMsg string) []QAIssue {
+	matches := nextBuildFileErrorRe.FindAllStringSubmatch(buildErrMsg, -1)
+	seen := map[string]bool{}
+	var issues []QAIssue
+	for _, m := range matches {
+		file, msg := m[1], m[2]
+		key := file + "|" + msg
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		issues = append(issues, QAIssue{
+			File:     file,
+			Severity: "blocking",
+			Message:  "Build failure in this file: " + msg,
+		})
+	}
+	return issues
+}
+
+// findPageForFile returns the PageSpec whose route file(s) match the given
+// generated file path, per pageRouteMatcher.
+func findPageForFile(pages []PageSpec, file string) (PageSpec, bool) {
+	for _, p := range pages {
+		if pageRouteMatcher(p.Path)(file) {
+			return p, true
+		}
+	}
+	return PageSpec{}, false
+}
+
+// componentFilePathRe extracts a component's name from its generated file
+// path (src/components/<Name>.tsx), per code.tmpl's own naming rule.
+var componentFilePathRe = regexp.MustCompile(`^src/components/([A-Za-z0-9_]+)\.tsx$`)
+
+func componentNameForFile(file string) (string, bool) {
+	m := componentFilePathRe.FindStringSubmatch(file)
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
+}
+
+// repairBuildFailure asks the LLM to fix the specific file(s) responsible
+// for a failed `next build`, reusing the exact same deterministic missing-
+// planned-component detection used during generation's QA loop (a more
+// precise signal than parsing free-form build log text — it directly names
+// the fix: generate the missing component), falling back to parsing
+// Next.js's standard build-log format for anything else. This is what lets
+// RedeployWorkflow's rebuild-from-saved-source path recover from a build
+// failure the same way GenerateAppWorkflow's QA loop already does, instead
+// of giving up immediately and leaving the deployment permanently failed
+// with no chance to self-heal.
+func repairBuildFailure(ctx workflow.Context, runID uuid.UUID, spec PlanOutput, appKind string, files map[string]string, buildErrMsg string, attempt int) (map[string]string, error) {
+	plannedComponents := map[string]bool{}
+	for _, c := range spec.Components {
+		plannedComponents[c.Name] = true
+	}
+
+	targets := map[string]codeTarget{}
+	issuesByTarget := map[string][]QAIssue{}
+
+	if byFile := findMissingComponentImportsByFile(files); len(byFile) > 0 {
+		for path := range byFile {
+			for _, name := range byFile[path] {
+				if !plannedComponents[name] {
+					continue
+				}
+				key := "component:" + name
+				if _, ok := targets[key]; ok {
+					continue
+				}
+				var comp ComponentSpec
+				for _, c := range spec.Components {
+					if c.Name == name {
+						comp = c
+						break
+					}
+				}
+				targets[key] = codeTarget{component: &comp}
+				issuesByTarget[key] = []QAIssue{{
+					File:     "src/components/" + name + ".tsx",
+					Severity: "blocking",
+					Message: fmt.Sprintf(
+						"This component is imported elsewhere in the app but the build still can't resolve it. Generate src/components/%s.tsx now, exporting a component named %s with a generic/reusable props interface.",
+						name, name,
+					),
+				}}
+			}
+		}
+	}
+
+	// Nothing the missing-component check explains — attribute the real
+	// build error (TypeScript error, syntax error, bad export, ...) to its
+	// file via Next.js's standard log format and regenerate that specific
+	// target with the actual error as feedback.
+	if len(targets) == 0 {
+		for _, issue := range parseBuildLogFileIssues(buildErrMsg) {
+			if page, ok := findPageForFile(spec.Pages, issue.File); ok {
+				key := "page:" + page.Path
+				p := page
+				targets[key] = codeTarget{page: &p}
+				issuesByTarget[key] = append(issuesByTarget[key], issue)
+				continue
+			}
+			if name, ok := componentNameForFile(issue.File); ok {
+				for _, c := range spec.Components {
+					if c.Name == name {
+						key := "component:" + name
+						comp := c
+						targets[key] = codeTarget{component: &comp}
+						issuesByTarget[key] = append(issuesByTarget[key], issue)
+						break
+					}
+				}
+			}
+		}
+	}
+
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("could not attribute build failure to a specific known page or component to repair")
+	}
+
+	merged := make(map[string]string, len(files))
+	for k, v := range files {
+		merged[k] = v
+	}
+
+	for key, target := range targets {
+		var out CodeOutput
+		callErr := workflow.ExecuteActivity(ctx, codeActivityName, CodeInput{
+			RunID:           runID,
+			Attempt:         attempt,
+			Spec:            spec,
+			PriorFiles:      files,
+			QAFeedback:      issuesByTarget[key],
+			AppKind:         appKind,
+			TargetPage:      target.page,
+			TargetComponent: target.component,
+		}).Get(ctx, &out)
+		if callErr != nil {
+			return nil, callErr
+		}
+		for path, content := range out.Files {
+			merged[path] = content
+		}
+	}
+
+	return merged, nil
+}
+
 type GenerateAppInput struct {
 	RunID      uuid.UUID
 	AppID      uuid.UUID
@@ -119,6 +292,13 @@ type GenerateAppResult struct {
 	// succeeded — this is what lets Deploy retry a failed build later
 	// (RedeployWorkflow) without a full regenerate.
 	SourcePath string
+	// Spec is the Plan spec this run was generated from, persisted
+	// alongside it (generation_runs.spec) so RedeployWorkflow's rebuild-
+	// from-saved-source path can ask the LLM to repair specific files on a
+	// build failure — using the real Plan (page/component list) instead of
+	// nothing, which is what previously made a repair loop impossible
+	// there: CodeActivity needs a Spec to scope a targeted regeneration.
+	Spec PlanOutput
 }
 
 // PublishBundleInput/Output are used by PublishBundleActivity, which
@@ -170,6 +350,15 @@ type FetchRunSourceInput struct {
 
 type FetchRunSourceOutput struct {
 	Files map[string]string
+	// Spec and AppKind are the run's original Plan spec and app kind,
+	// fetched alongside the source so RedeployWorkflow's rebuild-from-
+	// source path can repair a build failure via a real, correctly-scoped
+	// CodeActivity call instead of giving up immediately. Spec is the zero
+	// value for runs generated before this was persisted (generation_runs
+	// predates the spec column) — RedeployWorkflow treats that as "no
+	// repair possible" and falls back to its old behavior.
+	Spec    PlanOutput
+	AppKind string
 }
 
 type UpdateRunBundlePathInput struct {
@@ -452,10 +641,6 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 		maxParallelCode = 1
 	}
 	const maxTargetRetries = 1
-	type codeTarget struct {
-		page      *PageSpec
-		component *ComponentSpec
-	}
 	targetLabel := func(t codeTarget) string {
 		switch {
 		case t.page != nil:
@@ -667,7 +852,7 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 				bundlePath = pubOut.BundlePath
 			}
 		}
-		result = GenerateAppResult{Status: status, Error: errMsg, BundlePath: bundlePath, SourcePath: sourcePath}
+		result = GenerateAppResult{Status: status, Error: errMsg, BundlePath: bundlePath, SourcePath: sourcePath, Spec: planOutput}
 		return result, nil
 	}
 
@@ -845,9 +1030,46 @@ func RedeployWorkflow(ctx workflow.Context, in RedeployInput) (result RedeployRe
 			return result, err
 		}
 
+		// If the build fails, don't give up immediately — repair specific
+		// files via CodeActivity (same self-heal detection the generation
+		// QA loop uses) and retry, up to maxRedeployRepairRetries times.
+		// Only possible when this run's Plan spec was actually persisted
+		// (see FetchRunSourceActivity) — runs from before that existed
+		// fall back to the previous give-up-immediately behavior.
+		const maxRedeployRepairRetries = 3
+		files := srcOut.Files
 		var pubOut PublishBundleOutput
-		if err = workflow.ExecuteActivity(ctx, publishActivityName, PublishBundleInput{RunID: in.RunID, Files: srcOut.Files}).Get(ctx, &pubOut); err != nil {
-			return result, err
+		var buildErr error
+		repaired := false
+		for attempt := 0; ; attempt++ {
+			buildErr = workflow.ExecuteActivity(ctx, publishActivityName, PublishBundleInput{RunID: in.RunID, Files: files}).Get(ctx, &pubOut)
+			if buildErr == nil {
+				break
+			}
+			if attempt >= maxRedeployRepairRetries || len(srcOut.Spec.Pages) == 0 {
+				err = buildErr
+				return result, err
+			}
+			var repairErr error
+			files, repairErr = repairBuildFailure(ctx, in.RunID, srcOut.Spec, srcOut.AppKind, files, buildErr.Error(), attempt+1)
+			if repairErr != nil {
+				// Repair itself failed (e.g. couldn't attribute the error to
+				// a known file) — report the ORIGINAL build error, since
+				// that's the actual, more useful diagnostic.
+				err = buildErr
+				return result, err
+			}
+			repaired = true
+		}
+
+		// The repair loop may have changed the source — persist it so a
+		// LATER redeploy attempt (or the next regenerate's PriorFiles)
+		// starts from the fixed version instead of repeating the same
+		// repair from scratch.
+		if repaired {
+			if err = workflow.ExecuteActivity(ctx, publishSourceActivityName, PublishSourceInput{RunID: in.RunID, Files: files}).Get(ctx, nil); err != nil {
+				return result, err
+			}
 		}
 
 		if err = workflow.ExecuteActivity(ctx, updateRunBundlePathActivityName, UpdateRunBundlePathInput{

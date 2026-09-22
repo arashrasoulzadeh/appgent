@@ -762,6 +762,122 @@ func TestRedeployWorkflow_BuildFailure_MarksDeploymentFailed(t *testing.T) {
 	env.AssertExpectations(t)
 }
 
+// TestRedeployWorkflow_BuildFailure_RepairsViaMissingComponent_ThenSucceeds
+// is a regression test for a real gap found during a full-flow audit:
+// RedeployWorkflow's rebuild-from-saved-source path had NO repair loop at
+// all — a build failure there just failed the deployment immediately, even
+// though the exact same class of failure (a planned component that was
+// never actually generated) self-heals fine during normal generation. Now
+// that a run's Plan spec is persisted, a build failure here can be repaired
+// via a correctly-scoped CodeActivity call the same way, instead of
+// requiring the user to notice and click "Regenerate" from scratch.
+func TestRedeployWorkflow_BuildFailure_RepairsViaMissingComponent_ThenSucceeds(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := newTestEnv(&suite)
+
+	savedSource := map[string]string{
+		"src/app/page.tsx": `import Header from "@/components/Header"`,
+	}
+	spec := apptemporal.PlanOutput{
+		Pages:      []apptemporal.PageSpec{{Name: "Home", Path: "/"}},
+		Components: []apptemporal.ComponentSpec{{Name: "Header", Type: "layout"}},
+	}
+	env.OnActivity("FetchRunSourceActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.FetchRunSourceOutput{Files: savedSource, Spec: spec, AppKind: "website"}, nil)
+
+	var buildCalls int
+	env.OnActivity("PublishBundleActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.PublishBundleInput) (apptemporal.PublishBundleOutput, error) {
+			buildCalls++
+			if _, ok := in.Files["src/components/Header.tsx"]; !ok {
+				return apptemporal.PublishBundleOutput{}, assertError("build failed: Module not found: Can't resolve '@/components/Header'")
+			}
+			return apptemporal.PublishBundleOutput{BundlePath: "runs/" + in.RunID.String() + "/"}, nil
+		})
+
+	env.OnActivity("CodeActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.CodeInput) (apptemporal.CodeOutput, error) {
+			require.NotNil(t, in.TargetComponent, "repair call must be scoped to the missing component")
+			require.Equal(t, "Header", in.TargetComponent.Name)
+			require.Len(t, in.QAFeedback, 1)
+			require.Equal(t, "src/components/Header.tsx", in.QAFeedback[0].File, "feedback must name the component's own file or CodeActivity has no reason to generate it")
+			return apptemporal.CodeOutput{Files: map[string]string{
+				"src/components/Header.tsx": "export default function Header() { return null }",
+			}}, nil
+		})
+
+	var publishedSource map[string]string
+	env.OnActivity("PublishSourceActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.PublishSourceInput) (apptemporal.PublishSourceOutput, error) {
+			publishedSource = in.Files
+			return apptemporal.PublishSourceOutput{SourcePath: "sources/" + in.RunID.String() + "/"}, nil
+		})
+
+	env.OnActivity("UpdateRunBundlePathActivity", mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity("PromoteDeploymentActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.PromoteDeploymentOutput{URL: "/api/v1/apps/x/live/index.html"}, nil)
+
+	in := newRedeployInput(true)
+	env.ExecuteWorkflow(apptemporal.RedeployWorkflow, in)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	var result apptemporal.RedeployResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, "live", result.Status)
+	require.Greater(t, buildCalls, 1, "must retry the build after repairing, not just once (exact count includes Temporal's own activity-level retries, not just this repair loop's rounds)")
+	require.Contains(t, publishedSource, "src/components/Header.tsx", "the repaired source must be persisted so it isn't lost/repeated next time")
+
+	env.AssertExpectations(t)
+}
+
+// TestRedeployWorkflow_BuildFailure_RepairExhausted_MarksFailed verifies
+// that when the repair loop can't fix a build failure within its retry
+// budget, the deployment still ends up marked 'failed' (never stuck at
+// 'deploying') with the real build diagnostic, not a generic repair error.
+func TestRedeployWorkflow_BuildFailure_RepairExhausted_MarksFailed(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := newTestEnv(&suite)
+
+	spec := apptemporal.PlanOutput{
+		Pages:      []apptemporal.PageSpec{{Name: "Home", Path: "/"}},
+		Components: []apptemporal.ComponentSpec{{Name: "Header", Type: "layout"}},
+	}
+	env.OnActivity("FetchRunSourceActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.FetchRunSourceOutput{
+			Files:   map[string]string{"src/app/page.tsx": `import Header from "@/components/Header"`},
+			Spec:    spec,
+			AppKind: "website",
+		}, nil)
+
+	// Always fails — the "repaired" component never actually resolves the
+	// import, simulating a model that keeps getting it wrong.
+	env.OnActivity("PublishBundleActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.PublishBundleOutput{}, assertError("build failed: Module not found: Can't resolve '@/components/Header'"))
+	env.OnActivity("CodeActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.CodeOutput{Files: map[string]string{}}, nil)
+
+	var failedDeploymentID uuid.UUID
+	var failedErr string
+	env.OnActivity("MarkDeploymentFailedActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.MarkDeploymentFailedInput) error {
+			failedDeploymentID = in.DeploymentID
+			failedErr = in.Error
+			return nil
+		})
+
+	in := newRedeployInput(true)
+	env.ExecuteWorkflow(apptemporal.RedeployWorkflow, in)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.Error(t, env.GetWorkflowError())
+	require.Equal(t, in.DeploymentID, failedDeploymentID)
+	require.Contains(t, failedErr, "Module not found", "must report the real build error, not a generic repair-loop error")
+
+	env.AssertNotCalled(t, "PromoteDeploymentActivity", mock.Anything, mock.Anything)
+}
+
 // TestGenerateAppWorkflow_MissingComponentImport_SelfHeals is a regression
 // test for a real production build failure: a page imported
 // "@/components/GhostThing", a name that was never in the Plan spec's

@@ -2,6 +2,7 @@ package agents
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/arashrasoulzadeh/appgent/internal/sandbox"
@@ -54,11 +55,23 @@ func (a *PersistActivities) PersistRunResult(ctx context.Context, runID, appID u
 		sourcePath = &result.SourcePath
 	}
 
+	// Persisted so RedeployWorkflow's rebuild-from-saved-source path can
+	// repair a later build failure with a correctly-scoped CodeActivity
+	// call — nil (not an empty object) for the "failed" exit path, where
+	// planOutput may be its zero value because Plan itself never ran.
+	var specJSON []byte
+	if result.Status != "failed" {
+		specJSON, err = json.Marshal(result.Spec)
+		if err != nil {
+			return fmt.Errorf("marshal spec: %w", err)
+		}
+	}
+
 	_, err = tx.Exec(ctx, `
 		UPDATE generation_runs
-		SET status = $1, error = $2, finished_at = now(), bundle_path = $4, source_path = $5
+		SET status = $1, error = $2, finished_at = now(), bundle_path = $4, source_path = $5, spec = $6
 		WHERE id = $3
-	`, result.Status, errText, runID, bundlePath, sourcePath)
+	`, result.Status, errText, runID, bundlePath, sourcePath, specJSON)
 	if err != nil {
 		return fmt.Errorf("update generation_runs: %w", err)
 	}
