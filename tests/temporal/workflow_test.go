@@ -785,6 +785,7 @@ func TestGenerateAppWorkflow_MissingComponentImport_SelfHeals(t *testing.T) {
 	env.OnActivity("DesignActivity", mock.Anything, mock.Anything).
 		Return(apptemporal.DesignOutput{}, nil)
 
+	var retryFeedback []apptemporal.QAIssue
 	env.OnActivity("CodeActivity", mock.Anything, mock.Anything).
 		Return(func(_ context.Context, in apptemporal.CodeInput) (apptemporal.CodeOutput, error) {
 			key := "shared"
@@ -796,6 +797,9 @@ func TestGenerateAppWorkflow_MissingComponentImport_SelfHeals(t *testing.T) {
 				// Invents a component that was never in the Plan's
 				// component list — nothing will ever generate it.
 				content = `import GhostThing from "@/components/GhostThing"`
+			}
+			if in.TargetPage != nil && in.TargetPage.Name == "Home" && in.Attempt == 2 {
+				retryFeedback = in.QAFeedback
 			}
 			return apptemporal.CodeOutput{Files: map[string]string{key + ".tsx": content}}, nil
 		})
@@ -824,6 +828,15 @@ func TestGenerateAppWorkflow_MissingComponentImport_SelfHeals(t *testing.T) {
 	// on the second attempt, after the retry regenerated Home without the
 	// bad import.
 	require.Equal(t, 1, qaCalls, "QAActivity must not be called while the structural check would already catch the failure")
+
+	// Regression check: the synthesized QAIssue must set File to the
+	// ACTUAL importing file (Home.tsx) — code.tmpl's retry-pass rule has
+	// each target check whether QA feedback mentions its own file before
+	// acting on it, so an issue with no File attribution would be
+	// silently ignored by every target, including Home itself.
+	require.Len(t, retryFeedback, 1)
+	require.Equal(t, "Home.tsx", retryFeedback[0].File, "QAIssue.File must identify the file with the bad import, or no target will recognize it as theirs to fix")
+	require.Contains(t, retryFeedback[0].Message, "GhostThing")
 
 	env.AssertExpectations(t)
 }

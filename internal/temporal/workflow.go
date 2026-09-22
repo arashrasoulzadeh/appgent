@@ -27,20 +27,51 @@ var componentImportRe = regexp.MustCompile(`from\s+["']@/components/([A-Za-z0-9_
 // corresponding src/components/<Name>.tsx file among files. Deterministic
 // (sorted) since this runs directly in workflow code.
 func findMissingComponentImports(files map[string]string) []string {
-	referenced := map[string]bool{}
-	for _, content := range files {
-		for _, m := range componentImportRe.FindAllStringSubmatch(content, -1) {
-			referenced[m[1]] = true
-		}
-	}
+	byFile := findMissingComponentImportsByFile(files)
+	seen := map[string]bool{}
 	var missing []string
-	for name := range referenced {
-		if _, ok := files["src/components/"+name+".tsx"]; !ok {
-			missing = append(missing, name)
+	for _, names := range byFile {
+		for _, name := range names {
+			if !seen[name] {
+				seen[name] = true
+				missing = append(missing, name)
+			}
 		}
 	}
 	sort.Strings(missing)
 	return missing
+}
+
+// findMissingComponentImportsByFile is like findMissingComponentImports but
+// keyed by which file(s) actually contain each bad import — needed so a
+// synthesized QAIssue can set File correctly. code.tmpl's retry-pass rule
+// tells each per-target call "if QA feedback doesn't mention any file in
+// your scope, return your scope's files unchanged" — a QAIssue with no File
+// attribution would be ignored by every target, including the one that
+// actually needs to fix it, since none of them would recognize the
+// feedback as being about their own file.
+func findMissingComponentImportsByFile(files map[string]string) map[string][]string {
+	byFile := map[string][]string{}
+	for path, content := range files {
+		seen := map[string]bool{}
+		var names []string
+		for _, m := range componentImportRe.FindAllStringSubmatch(content, -1) {
+			name := m[1]
+			if seen[name] {
+				continue
+			}
+			if _, ok := files["src/components/"+name+".tsx"]; ok {
+				continue
+			}
+			seen[name] = true
+			names = append(names, name)
+		}
+		if len(names) > 0 {
+			sort.Strings(names)
+			byFile[path] = names
+		}
+	}
+	return byFile
 }
 
 type GenerateAppInput struct {
@@ -636,16 +667,30 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 		// existing retry budget instead of requiring a full manual
 		// regenerate (which was needlessly burning tokens on Plan/Design
 		// too, neither of which caused or can fix this).
-		if missing := findMissingComponentImports(codeOutput.Files); len(missing) > 0 {
+		if byFile := findMissingComponentImportsByFile(codeOutput.Files); len(byFile) > 0 {
+			// One QAIssue per (importing file, missing component) pair,
+			// with File set to the ACTUAL importing file — code.tmpl's
+			// retry-pass rule has each per-target call check whether QA
+			// feedback mentions its own file before acting on it, so an
+			// issue with no File attribution would be silently ignored by
+			// every target, including the one that needs to fix it.
 			var issues []QAIssue
-			for _, name := range missing {
-				issues = append(issues, QAIssue{
-					Severity: "blocking",
-					Message: fmt.Sprintf(
-						"Component '%s' is imported from \"@/components/%s\" but was never generated — src/components/%s.tsx does not exist. Either generate this component properly (matching the Plan spec's component list), or if it was invented in error, rewrite the importing file to not reference it (inline the needed markup directly instead).",
-						name, name, name,
-					),
-				})
+			var files []string
+			for path := range byFile {
+				files = append(files, path)
+			}
+			sort.Strings(files)
+			for _, path := range files {
+				for _, name := range byFile[path] {
+					issues = append(issues, QAIssue{
+						File:     path,
+						Severity: "blocking",
+						Message: fmt.Sprintf(
+							"This file imports '%s' from \"@/components/%s\", but that component was never generated — src/components/%s.tsx does not exist. Either generate this component properly (matching the Plan spec's component list), or if it was invented in error, rewrite THIS file to not reference it (inline the needed markup directly instead).",
+							name, name, name,
+						),
+					})
+				}
 			}
 			qaOutput = QAOutput{Passed: false, Issues: issues}
 		} else {
