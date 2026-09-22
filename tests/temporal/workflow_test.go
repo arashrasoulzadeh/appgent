@@ -827,3 +827,60 @@ func TestGenerateAppWorkflow_MissingComponentImport_SelfHeals(t *testing.T) {
 
 	env.AssertExpectations(t)
 }
+
+// TestGenerateAppWorkflow_MissingComponentImport_StubbedAsLastResort covers
+// the case the self-heal retry loop alone can't guarantee: the LLM keeps
+// regenerating the exact same hallucinated "@/components/GhostThing"
+// import on every attempt, exhausting all retries with the bad import
+// still present. The workflow must still publish something that BUILDS —
+// stubbing the missing component out — rather than reaching the build
+// step with a guaranteed "Module not found" failure after retries are
+// already spent.
+func TestGenerateAppWorkflow_MissingComponentImport_StubbedAsLastResort(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := newTestEnv(&suite)
+
+	env.OnActivity("PlanActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.PlanOutput{Pages: []apptemporal.PageSpec{{Name: "Home", Path: "/"}}}, nil)
+	env.OnActivity("DesignActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.DesignOutput{}, nil)
+
+	// Always references the never-generated component, no matter which
+	// attempt this is — simulating an LLM that never actually fixes it.
+	env.OnActivity("CodeActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.CodeInput) (apptemporal.CodeOutput, error) {
+			key := "shared"
+			content := "export default function X() { return null }"
+			if in.TargetPage != nil {
+				key = in.TargetPage.Name
+				content = `import GhostThing from "@/components/GhostThing"`
+			}
+			return apptemporal.CodeOutput{Files: map[string]string{key + ".tsx": content}}, nil
+		})
+	// QAActivity is deliberately not mocked — the structural check must
+	// catch this on every attempt, never falling through to a real QA
+	// call, all the way to retry exhaustion.
+
+	var publishedFiles map[string]string
+	env.OnActivity("PublishBundleActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.PublishBundleInput) (apptemporal.PublishBundleOutput, error) {
+			publishedFiles = in.Files
+			return apptemporal.PublishBundleOutput{BundlePath: "runs/" + in.RunID.String() + "/"}, nil
+		})
+	env.OnActivity("PersistRunResultActivity", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(nil)
+
+	env.ExecuteWorkflow(apptemporal.GenerateAppWorkflow, newInput())
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	var result apptemporal.GenerateAppResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, "needs_review", result.Status, "retries genuinely exhausted with the bad import still present")
+
+	require.Contains(t, publishedFiles, "src/components/GhostThing.tsx", "must stub the still-missing component before publishing rather than let the build fail")
+	require.Contains(t, publishedFiles["src/components/GhostThing.tsx"], "export default")
+
+	env.AssertExpectations(t)
+}

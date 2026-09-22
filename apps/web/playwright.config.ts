@@ -12,13 +12,11 @@ export default defineConfig({
     baseURL: 'http://localhost:3000',
     trace: 'on-first-retry',
   },
-  // Chromium, not WebKit: WebKit's cookie/ITP handling in headless CI is
-  // markedly stricter than Chromium's and has repeatedly dropped the
-  // session cookie set by the API (a different port on localhost) between
-  // login's POST and the following navigation — every test past the
-  // login step failed with the app stuck on /login despite the login
-  // request itself succeeding. Chromium is the standard, reliable choice
-  // for headless CI E2E and doesn't have this problem.
+  // Chromium, not WebKit — WebKit's ITP cookie handling was originally
+  // suspected as the cause of every post-login test failing, but
+  // switching engines alone did NOT fix it (still failed identically on
+  // Chromium), which disproves that theory. Chromium remains the
+  // standard, reliable choice for headless CI E2E regardless.
   projects: [
     {
       name: 'chromium',
@@ -27,12 +25,30 @@ export default defineConfig({
       },
     },
   ],
+  // `next start` (a real production build), not `next dev`. The actual
+  // root cause of every post-login test failing: zero requests ever
+  // reached the API during the whole E2E run (confirmed from the API's
+  // own request logs) — not even the login POST — meaning form
+  // interactions weren't reaching React's event handlers at all. `next
+  // dev`'s Turbopack JIT-compiles each route on first request, so the
+  // server can respond with HTML before the client JS bundle has
+  // finished compiling/hydrating; the auth spec's beforeEach only waited
+  // for the email input to be "attached" to the DOM, not for hydration
+  // to finish, so Playwright could fill/click the form before React's
+  // onSubmit was actually wired up. `next start` serves an already-built,
+  // already-hydrated app — no compile-on-first-request race — and is
+  // what's actually deployed in production anyway (see docker-compose.yml
+  // web service / apps/web/Dockerfile), so this is more representative
+  // too, not just a workaround.
   webServer: {
-    command: 'pnpm dev',
+    command: 'pnpm build && pnpm start',
     cwd: path.join(__dirname),
     url: 'http://localhost:3000',
     reuseExistingServer: !process.env.CI,
-    timeout: 180000,
+    // Bumped from 180s: a real `next build` takes meaningfully longer
+    // than `next dev`'s near-instant startup, and this timeout now has
+    // to cover both the build and the server becoming ready.
+    timeout: 300000,
     stdout: 'pipe',
     stderr: 'pipe',
   },

@@ -552,6 +552,26 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 		bundlePath := ""
 		sourcePath := ""
 		if len(codeOutput.Files) > 0 {
+			// Last-resort backstop: the self-heal retry loop above gives
+			// the LLM up to maxQARetries chances to stop importing a
+			// component it never actually generated, but nothing
+			// guarantees it succeeds — it can regenerate the exact same
+			// hallucinated import every attempt. Rather than let a
+			// guaranteed-to-fail "Module not found" build error reach the
+			// user after all retries are already spent, stub out any
+			// components still missing at this point so the build can
+			// always at least SUCCEED (with that one piece silently
+			// blank) instead of hard-failing on something retries already
+			// tried and failed to fix.
+			for _, name := range findMissingComponentImports(codeOutput.Files) {
+				codeOutput.Files["src/components/"+name+".tsx"] = fmt.Sprintf(
+					"// Auto-generated placeholder: the code-generation model referenced\n"+
+						"// this component without ever defining it, and retries didn't fix it.\n"+
+						"function %sPlaceholder() {\n  return null\n}\nexport default %sPlaceholder\nexport { %sPlaceholder as %s }\n",
+					name, name, name, name,
+				)
+			}
+
 			// Source is saved FIRST and independently of the build, so it
 			// survives even when the build itself fails below — that's
 			// what lets Deploy retry the build later (RedeployWorkflow)
