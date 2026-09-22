@@ -241,7 +241,22 @@ func repairBuildFailure(ctx workflow.Context, runID uuid.UUID, spec PlanOutput, 
 		merged[k] = v
 	}
 
-	for key, target := range targets {
+	// Iterate in a deterministic (sorted) order — Go map iteration order is
+	// randomized, and calling workflow.ExecuteActivity from inside a
+	// nondeterministic-order loop is a real Temporal replay hazard: a
+	// worker restart mid-repair-loop would replay this workflow from
+	// history, and a different activity-call order on replay than the
+	// original execution triggers a "nondeterministic workflow" failure.
+	// The exact same hazard the original self-heal code in
+	// GenerateAppWorkflow already avoids by sorting before iterating.
+	keys := make([]string, 0, len(targets))
+	for key := range targets {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	for _, key := range keys {
+		target := targets[key]
 		var out CodeOutput
 		callErr := workflow.ExecuteActivity(ctx, codeActivityName, CodeInput{
 			RunID:           runID,
