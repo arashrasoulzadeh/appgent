@@ -288,6 +288,48 @@ func repairBuildFailure(ctx workflow.Context, runID uuid.UUID, spec PlanOutput, 
 	return merged, nil
 }
 
+// maxBuildRepairRetries bounds both buildWithRepair's own rounds and is
+// reused as the value for callers that need it (e.g. the "attempt" number
+// passed to repairBuildFailure).
+const maxBuildRepairRetries = 3
+
+// buildWithRepair runs PublishBundleActivity and, on failure, repairs via
+// repairBuildFailure and retries — up to maxBuildRepairRetries rounds —
+// before giving up. Shared by GenerateAppWorkflow's finishWithBundle (so a
+// freshly generated run's FIRST publish attempt gets this guarantee, not
+// just a later manual Deploy click) and RedeployWorkflow's rebuild-from-
+// saved-source path. Only possible when spec.Pages is non-empty (a real
+// persisted Plan spec) — callers with no spec (redeploying a run from
+// before spec persistence existed) get repaired=false and the original
+// build error back on the first failure, matching the pre-repair-loop
+// behavior for those older runs.
+//
+// Returns the (possibly repaired) files, the successful publish output,
+// whether any repair actually happened, and the final error (nil on
+// success).
+func buildWithRepair(ctx workflow.Context, runID uuid.UUID, spec PlanOutput, appKind string, files map[string]string) (finalFiles map[string]string, pubOut PublishBundleOutput, repaired bool, err error) {
+	finalFiles = files
+	for attempt := 0; ; attempt++ {
+		err = workflow.ExecuteActivity(ctx, publishActivityName, PublishBundleInput{RunID: runID, Files: finalFiles}).Get(ctx, &pubOut)
+		if err == nil {
+			return finalFiles, pubOut, repaired, nil
+		}
+		if attempt >= maxBuildRepairRetries || len(spec.Pages) == 0 {
+			return finalFiles, pubOut, repaired, err
+		}
+		buildErr := err
+		repairedFiles, repairErr := repairBuildFailure(ctx, runID, spec, appKind, finalFiles, buildErr.Error(), attempt+1)
+		if repairErr != nil {
+			// Repair itself failed (e.g. couldn't attribute the error to a
+			// known file) — report the ORIGINAL build error, the more
+			// useful diagnostic, not the repair mechanism's own failure.
+			return finalFiles, pubOut, repaired, buildErr
+		}
+		finalFiles = repairedFiles
+		repaired = true
+	}
+}
+
 type GenerateAppInput struct {
 	RunID      uuid.UUID
 	AppID      uuid.UUID
@@ -865,15 +907,51 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 				sourcePath = srcOut.SourcePath
 			}
 
-			var pubOut PublishBundleOutput
-			pubErr := workflow.ExecuteActivity(publishCtx, publishActivityName, PublishBundleInput{
-				RunID: in.RunID,
-				Files: codeOutput.Files,
-			}).Get(publishCtx, &pubOut)
+			// Don't just log-and-give-up on a build failure here the way
+			// this used to: the last-resort stub above only ever covered
+			// ONE class of failure (a missing component import) — a real
+			// TypeScript error (e.g. a required prop never passed) sailed
+			// straight through QA's own retry budget and landed here with
+			// nothing left to fix it, leaving BundlePath empty while the
+			// run still reported "needs_review" — which the UI treats as
+			// deployable, so a manual Deploy click would only then (and
+			// only via a SEPARATE redeploy) discover and repair the exact
+			// same error this step could have already fixed. Reuse the
+			// same repair loop RedeployWorkflow uses so a freshly
+			// generated run's very first publish attempt gets the same
+			// guarantee, not just a later manual retry.
+			builtFiles, pubOut, repaired, pubErr := buildWithRepair(publishCtx, in.RunID, planOutput, in.AppKind, codeOutput.Files)
 			if pubErr != nil {
 				workflow.GetLogger(ctx).Warn("publish bundle failed", "runID", in.RunID, "error", pubErr)
 			} else {
 				bundlePath = pubOut.BundlePath
+				codeOutput.Files = builtFiles
+				if repaired && status == "needs_review" {
+					// QA's own retry budget never got this to a clean
+					// build, but the repair loop just did — the actual
+					// deliverable now builds with zero known errors, so
+					// it no longer belongs in the "review this, it might
+					// be broken" bucket.
+					status = "succeeded"
+					errMsg = ""
+				}
+			}
+
+			// The repair loop may have changed the files after source was
+			// already saved above — re-save so the persisted source
+			// matches what actually builds, the same way RedeployWorkflow
+			// re-persists after its own repair rounds.
+			if repaired {
+				var repairedSrcOut PublishSourceOutput
+				repairedSrcErr := workflow.ExecuteActivity(publishCtx, publishSourceActivityName, PublishSourceInput{
+					RunID: in.RunID,
+					Files: builtFiles,
+				}).Get(publishCtx, &repairedSrcOut)
+				if repairedSrcErr != nil {
+					workflow.GetLogger(ctx).Warn("re-publish repaired source failed", "runID", in.RunID, "error", repairedSrcErr)
+				} else {
+					sourcePath = repairedSrcOut.SourcePath
+				}
 			}
 		}
 		result = GenerateAppResult{Status: status, Error: errMsg, BundlePath: bundlePath, SourcePath: sourcePath, Spec: planOutput}
@@ -897,7 +975,13 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 	}
 
 	// QA loop
-	maxQARetries := 3
+	// 15 (not 3): the user explicitly wants QA to keep trying to reach a
+	// genuinely clean build before a run is ever eligible for deploy,
+	// rather than settling for "needs_review" (deployable in the UI) after
+	// only a few attempts. Each round is still bounded — the structural
+	// self-heal check costs zero LLM tokens, and QA's own real-build check
+	// short-circuits before any LLM call whenever it fails deterministically.
+	maxQARetries := 15
 	for attempt := 1; attempt <= maxQARetries; attempt++ {
 		var qaOutput QAOutput
 
@@ -1056,34 +1140,15 @@ func RedeployWorkflow(ctx workflow.Context, in RedeployInput) (result RedeployRe
 
 		// If the build fails, don't give up immediately — repair specific
 		// files via CodeActivity (same self-heal detection the generation
-		// QA loop uses) and retry, up to maxRedeployRepairRetries times.
-		// Only possible when this run's Plan spec was actually persisted
-		// (see FetchRunSourceActivity) — runs from before that existed
-		// fall back to the previous give-up-immediately behavior.
-		const maxRedeployRepairRetries = 3
-		files := srcOut.Files
-		var pubOut PublishBundleOutput
-		var buildErr error
-		repaired := false
-		for attempt := 0; ; attempt++ {
-			buildErr = workflow.ExecuteActivity(ctx, publishActivityName, PublishBundleInput{RunID: in.RunID, Files: files}).Get(ctx, &pubOut)
-			if buildErr == nil {
-				break
-			}
-			if attempt >= maxRedeployRepairRetries || len(srcOut.Spec.Pages) == 0 {
-				err = buildErr
-				return result, err
-			}
-			var repairErr error
-			files, repairErr = repairBuildFailure(ctx, in.RunID, srcOut.Spec, srcOut.AppKind, files, buildErr.Error(), attempt+1)
-			if repairErr != nil {
-				// Repair itself failed (e.g. couldn't attribute the error to
-				// a known file) — report the ORIGINAL build error, since
-				// that's the actual, more useful diagnostic.
-				err = buildErr
-				return result, err
-			}
-			repaired = true
+		// QA loop uses) and retry, via the same buildWithRepair loop
+		// GenerateAppWorkflow's own first publish attempt now uses. Only
+		// possible when this run's Plan spec was actually persisted (see
+		// FetchRunSourceActivity) — runs from before that existed fall
+		// back to the previous give-up-immediately behavior.
+		files, pubOut, repaired, buildErr := buildWithRepair(ctx, in.RunID, srcOut.Spec, srcOut.AppKind, srcOut.Files)
+		if buildErr != nil {
+			err = buildErr
+			return result, err
 		}
 
 		// The repair loop may have changed the source — persist it so a

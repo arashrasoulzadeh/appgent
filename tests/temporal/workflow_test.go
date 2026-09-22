@@ -1183,6 +1183,92 @@ func TestGenerateAppWorkflow_PageFailsOnRetryRound_KeepsLastKnownGoodVersion(t *
 // stubbing the missing component out — rather than reaching the build
 // step with a guaranteed "Module not found" failure after retries are
 // already spent.
+// TestGenerateAppWorkflow_RealBuildError_RepairedOnFirstPublish_UpgradesToSucceeded
+// is a regression test for a real production case: QA's real-build check
+// caught a genuine TypeScript error (a required prop never passed to a
+// component — "Property 'skills' is missing in type '{}'") that persisted
+// across all of QA's own retries — a class of failure the missing-
+// component last-resort stub can't fix (nothing is missing; the file just
+// has a real bug). Previously, finishWithBundle just logged the
+// subsequent publish failure and moved on, leaving the run "needs_review"
+// with an EMPTY bundle path — deployable in the UI, but with nothing
+// actually fixed, meaning a manual Deploy click was the only way the bug
+// ever got a chance to self-heal (via RedeployWorkflow's separate repair
+// loop). Now finishWithBundle's own first publish attempt reuses that
+// same repair loop, so the run comes out already fixed — and, since the
+// final artifact now builds with zero known errors, its status upgrades
+// from "needs_review" to "succeeded" rather than staying in the "might be
+// broken" bucket.
+func TestGenerateAppWorkflow_RealBuildError_RepairedOnFirstPublish_UpgradesToSucceeded(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := newTestEnv(&suite)
+
+	env.OnActivity("PlanActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.PlanOutput{Pages: []apptemporal.PageSpec{{Name: "Skills", Path: "/skills"}}}, nil)
+	env.OnActivity("DesignActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.DesignOutput{}, nil)
+
+	var skillsPageCalls int
+	env.OnActivity("CodeActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.CodeInput) (apptemporal.CodeOutput, error) {
+			if in.TargetPage == nil {
+				return apptemporal.CodeOutput{Files: map[string]string{"shared.tsx": "export {}"}}, nil
+			}
+			skillsPageCalls++
+			// QAActivity below is mocked to always fail, so this page gets
+			// regenerated: once for the initial pass, then once per QA
+			// retry (maxQARetries-1 = 14, since maxQARetries=15) = 15
+			// total, before ever reaching finishWithBundle. Stay broken
+			// through all of those — only the repair loop's own call (the
+			// 16th) actually fixes it, simulating a bug the LLM kept
+			// failing to fix within QA's own budget but that the
+			// real-error-driven repair path can.
+			if skillsPageCalls <= 15 {
+				return apptemporal.CodeOutput{Files: map[string]string{
+					"src/app/skills/page.tsx": "export default function Skills() { return <SkillsList /> }",
+				}}, nil
+			}
+			require.Contains(t, in.QAFeedback[0].Message, "skills", "repair feedback must carry the real TS error")
+			return apptemporal.CodeOutput{Files: map[string]string{
+				"src/app/skills/page.tsx": `export default function Skills() { return <SkillsList skills={[]} /> }`,
+			}}, nil
+		})
+
+	env.OnActivity("QAActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.QAOutput{Passed: false, Issues: []apptemporal.QAIssue{{
+			File:     "src/app/skills/page.tsx",
+			Severity: "blocking",
+			Message:  "Build failure in this file: Type error: Property 'skills' is missing in type '{}' but required in type 'SkillsListProps'.",
+		}}}, nil)
+
+	var buildCalls int
+	env.OnActivity("PublishBundleActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.PublishBundleInput) (apptemporal.PublishBundleOutput, error) {
+			buildCalls++
+			if strings.Contains(in.Files["src/app/skills/page.tsx"], "skills={[]}") {
+				return apptemporal.PublishBundleOutput{BundlePath: "runs/" + in.RunID.String() + "/"}, nil
+			}
+			return apptemporal.PublishBundleOutput{}, assertError(
+				"build: build failed: exit status 1\n./src/app/skills/page.tsx:1:1\nType error: Property 'skills' is missing in type '{}' but required in type 'SkillsListProps'.\n")
+		})
+	env.OnActivity("PersistRunResultActivity", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(nil)
+
+	env.ExecuteWorkflow(apptemporal.GenerateAppWorkflow, newInput())
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	var result apptemporal.GenerateAppResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, "succeeded", result.Status, "the artifact now builds clean, so this must not stay needs_review")
+	require.Empty(t, result.Error)
+	require.NotEmpty(t, result.BundlePath, "a genuinely repaired build must actually get published")
+	require.Greater(t, buildCalls, 1, "must have retried the build after repairing")
+
+	env.AssertExpectations(t)
+}
+
 func TestGenerateAppWorkflow_MissingComponentImport_StubbedAsLastResort(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := newTestEnv(&suite)
