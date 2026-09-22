@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { api, App, Run, AgentStep, Deployment } from "@/lib/api"
-import { formatDate, formatDateTime, truncate, cn, apiErrorMessage } from "@/lib/utils"
+import { formatDateTime, truncate, cn, apiErrorMessage } from "@/lib/utils"
 import {
   ChevronLeft, RotateCcw, CheckCircle,
   Loader2, FileCode, Zap,
@@ -44,7 +44,6 @@ export default function AppDetailPage() {
   const [steps, setSteps] = useState<AgentStep[]>([])
   const [deployments, setDeployments] = useState<Deployment[]>([])
   const [previewUrl, setPreviewUrl] = useState<string>("")
-  const [previewExpiry, setPreviewExpiry] = useState<string>("")
   const [loading, setLoading] = useState(true)
   const [regenerating, setRegenerating] = useState(false)
   const [deploying, setDeploying] = useState(false)
@@ -60,10 +59,9 @@ export default function AppDetailPage() {
 
   const loadPreview = useCallback(async (runId: string, forAppId: string = appId) => {
     try {
-      const { preview_url, expires_at } = await api.getPreviewUrl(forAppId, runId)
+      const { preview_url } = await api.getPreviewUrl(forAppId, runId)
       if (currentAppIdRef.current !== forAppId) return
       setPreviewUrl(preview_url)
-      setPreviewExpiry(expires_at)
     } catch (err) {
       console.error("Failed to load preview:", err)
     }
