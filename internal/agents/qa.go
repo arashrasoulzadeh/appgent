@@ -95,6 +95,7 @@ func (a *QAAgent) Execute(ctx context.Context, in temporal.QAInput) (temporal.QA
 	// in.Files == nil calls (nothing to build yet) — both fall back to the
 	// previous "assume it builds" behavior rather than erroring.
 	if builder != nil && len(in.Files) > 0 {
+		ensureTsConfigPathAlias(in.Files)
 		if _, buildLog, buildErr := builder.Build(ctx, in.RunID, in.Files); buildErr != nil {
 			// A real, deterministic build failure is unambiguous — no need
 			// to spend an LLM call asking it to "interpret" a failure that
@@ -106,11 +107,11 @@ func (a *QAAgent) Execute(ctx context.Context, in temporal.QAInput) (temporal.QA
 
 	var buf bytes.Buffer
 	err := a.prompt.Execute(&buf, map[string]interface{}{
-		"AppKind":      in.AppKind,
-		"BuildOutput":  buildOutput,
-		"LinkOutput":   linkOutput,
-		"A11yOutput":   a11yOutput,
-		"PWAOutput":    pwaOutput,
+		"AppKind":     in.AppKind,
+		"BuildOutput": buildOutput,
+		"LinkOutput":  linkOutput,
+		"A11yOutput":  a11yOutput,
+		"PWAOutput":   pwaOutput,
 	})
 	if err != nil {
 		return temporal.QAOutput{}, fmt.Errorf("execute template: %w", err)
@@ -130,17 +131,17 @@ func (a *QAAgent) Execute(ctx context.Context, in temporal.QAInput) (temporal.QA
 				"items": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"file":      map[string]string{"type": "string"},
-						"line":      map[string]string{"type": "integer"},
-						"severity":  map[string]interface{}{"type": "string", "enum": []string{"blocking", "warning"}},
-						"message":   map[string]string{"type": "string"},
+						"file":     map[string]string{"type": "string"},
+						"line":     map[string]string{"type": "integer"},
+						"severity": map[string]interface{}{"type": "string", "enum": []string{"blocking", "warning"}},
+						"message":  map[string]string{"type": "string"},
 					},
-					"required": []string{"file", "line", "severity", "message"},
+					"required":             []string{"file", "line", "severity", "message"},
 					"additionalProperties": false,
 				},
 			},
 		},
-		"required": []string{"passed", "issues"},
+		"required":             []string{"passed", "issues"},
 		"additionalProperties": false,
 	}
 

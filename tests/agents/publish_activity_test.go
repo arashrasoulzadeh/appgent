@@ -33,7 +33,7 @@ func (f *fakeProvisioner) FetchSource(context.Context, uuid.UUID) (map[string]st
 	return f.fetchSourceFiles, f.fetchSourceErr
 }
 func (f *fakeProvisioner) Promote(context.Context, uuid.UUID, uuid.UUID) error { return nil }
-func (f *fakeProvisioner) Teardown(context.Context, uuid.UUID) error          { return nil }
+func (f *fakeProvisioner) Teardown(context.Context, uuid.UUID) error           { return nil }
 
 // fakeBuilder passes files through unchanged by default (buildFn nil) so
 // tests that only care about the provisioner side don't need real build
@@ -114,7 +114,9 @@ func TestPublishBundleActivity_NoFiles(t *testing.T) {
 func TestPublishBundleActivity_Success(t *testing.T) {
 	fp := &fakeProvisioner{}
 	builtFiles := map[string]string{"index.html": "<html>built</html>"}
-	fb := &fakeBuilder{buildFn: func(map[string]string) (map[string]string, string, error) { return builtFiles, "npm install...\nbuild succeeded", nil }}
+	fb := &fakeBuilder{buildFn: func(map[string]string) (map[string]string, string, error) {
+		return builtFiles, "npm install...\nbuild succeeded", nil
+	}}
 	setFakes(t, fp, fb)
 
 	runID := uuid.New()
@@ -145,6 +147,68 @@ func TestPublishBundleActivity_BuildError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "npm run build failed")
 	assert.Empty(t, fp.provisionCalls, "must not publish anything when the build fails")
+}
+
+// TestPublishBundleActivity_ForcesTsConfigPathAlias_BeforeBuild is a
+// regression test for the ACTUAL root cause behind every "Module not
+// found" build failure chased across production runs (v27, v28, v30,
+// v31): the LLM generated a tsconfig.json with no "baseUrl"/"paths"
+// mapping for the "@/*" alias every generated file's imports rely on
+// (e.g. "@/components/Header"). Without it, Next.js's webpack build can't
+// resolve ANY "@/..." import — producing the exact same "Module not
+// found: Can't resolve '@/components/X'" error a genuinely missing
+// component file would, even though the component files were confirmed
+// present (verified directly against production's agent_steps.input JSON
+// for the exact run that hit this). PublishBundleActivity is what BOTH
+// GenerateAppWorkflow's final publish step AND RedeployWorkflow's
+// rebuild-from-saved-source path call, so it must force-correct
+// tsconfig.json before every real build, regardless of what the LLM
+// wrote or when the source was originally generated.
+func TestPublishBundleActivity_ForcesTsConfigPathAlias_BeforeBuild(t *testing.T) {
+	fp := &fakeProvisioner{}
+	fb := &fakeBuilder{buildFn: func(files map[string]string) (map[string]string, string, error) {
+		return files, "", nil
+	}}
+	setFakes(t, fp, fb)
+
+	brokenTsConfig := `{"compilerOptions":{"target":"es5","strict":true}}`
+	_, err := agents.PublishBundleActivity(context.Background(), apptemporal.PublishBundleInput{
+		RunID: uuid.New(),
+		Files: map[string]string{
+			"tsconfig.json":             brokenTsConfig,
+			"src/app/page.tsx":          `import Header from "@/components/Header"`,
+			"src/components/Header.tsx": "export default function Header() { return null }",
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, fb.calls, 1)
+	gotTsConfig := fb.calls[0]["tsconfig.json"]
+	assert.NotEqual(t, brokenTsConfig, gotTsConfig, "tsconfig.json was sent to the build unmodified — the missing @/* path alias was never corrected")
+	assert.Contains(t, gotTsConfig, `"@/*"`, "corrected tsconfig.json still missing the @/* path alias")
+}
+
+// TestPublishSourceActivity_ForcesTsConfigPathAlias is the same regression
+// as TestPublishBundleActivity_ForcesTsConfigPathAlias_BeforeBuild, but for
+// the SAVED source — so that a later RedeployWorkflow rebuild (which fetches
+// this saved source, not the original codegen output) also gets the
+// correction, not just this run's own immediate build.
+func TestPublishSourceActivity_ForcesTsConfigPathAlias(t *testing.T) {
+	fp := &fakeProvisioner{}
+	setFakes(t, fp, &fakeBuilder{})
+
+	brokenTsConfig := `{"compilerOptions":{"target":"es5","strict":true}}`
+	_, err := agents.PublishSourceActivity(context.Background(), apptemporal.PublishSourceInput{
+		RunID: uuid.New(),
+		Files: map[string]string{
+			"tsconfig.json":    brokenTsConfig,
+			"src/app/page.tsx": `import Header from "@/components/Header"`,
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, fp.provisionSourceCalls, 1)
+	gotTsConfig := fp.provisionSourceCalls[0]["tsconfig.json"]
+	assert.NotEqual(t, brokenTsConfig, gotTsConfig, "saved source's tsconfig.json was never corrected")
+	assert.Contains(t, gotTsConfig, `"@/*"`)
 }
 
 func TestPublishBundleActivity_ProvisionError(t *testing.T) {

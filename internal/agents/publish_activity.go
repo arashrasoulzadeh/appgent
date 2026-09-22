@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/arashrasoulzadeh/appgent/internal/sandbox"
 	"github.com/arashrasoulzadeh/appgent/internal/temporal"
@@ -13,6 +14,58 @@ var (
 	provisioner sandbox.Provisioner
 	builder     sandbox.BuildRunner
 )
+
+// canonicalTsConfig is the tsconfig.json content code.tmpl instructs the
+// LLM to emit verbatim for every generated app — critically, its
+// baseUrl/paths mapping is what makes the "@/*" import alias (used by
+// EVERY generated file: pages import "@/components/Header", etc.) resolve
+// at all under Next.js's webpack build.
+const canonicalTsConfig = `{
+  "compilerOptions": {
+    "target": "es5",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "baseUrl": ".",
+    "paths": { "@/*": ["src/*"] }
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx"],
+  "exclude": ["node_modules"]
+}
+`
+
+// ensureTsConfigPathAlias is a deterministic, zero-LLM-token guarantee
+// that a build can always resolve "@/..." imports, regardless of whether
+// the LLM actually followed code.tmpl's instruction to emit tsconfig.json
+// with the required baseUrl/paths mapping. Real production failure mode
+// this fixes: the LLM omits (or gets wrong) tsconfig.json's path alias,
+// and EVERY "@/components/X" import across the whole app then fails to
+// build with "Module not found: Can't resolve '@/components/X'" — which
+// looks EXACTLY like a missing-component failure (the error message is
+// identical) but isn't: the component files genuinely exist, confirmed by
+// inspecting the actual Files map sent to a real build in production. No
+// amount of missing-component self-heal or per-file repair can fix this,
+// because the files it's "fixing" were never the actual problem — only
+// forcing tsconfig.json itself to be correct does. Mutates files in
+// place; called right before every real build (QA's build-check,
+// PublishBundleActivity, which covers both generation's publish and
+// RedeployWorkflow's rebuild).
+func ensureTsConfigPathAlias(files map[string]string) {
+	current, ok := files["tsconfig.json"]
+	if !ok || !strings.Contains(current, `"@/*"`) {
+		files["tsconfig.json"] = canonicalTsConfig
+	}
+}
 
 // SetProvisioner wires the object-storage-backed provisioner used to
 // publish generated bundles. Called once from the worker's main() — see
@@ -43,6 +96,7 @@ func PublishSourceActivity(ctx context.Context, in temporal.PublishSourceInput) 
 	if len(in.Files) == 0 {
 		return temporal.PublishSourceOutput{}, fmt.Errorf("no files to publish")
 	}
+	ensureTsConfigPathAlias(in.Files)
 	if err := provisioner.ProvisionSource(ctx, in.RunID, in.Files); err != nil {
 		return temporal.PublishSourceOutput{}, fmt.Errorf("provision source: %w", err)
 	}
@@ -121,6 +175,7 @@ func PublishBundleActivity(ctx context.Context, in temporal.PublishBundleInput) 
 		finishStep(ctx, stepID, nil, err)
 		return temporal.PublishBundleOutput{}, err
 	}
+	ensureTsConfigPathAlias(in.Files)
 
 	built, buildLog, err := builder.Build(ctx, in.RunID, in.Files)
 	if err != nil {

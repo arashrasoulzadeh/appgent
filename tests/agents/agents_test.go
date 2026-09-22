@@ -362,13 +362,18 @@ func TestQAAgentExecute_ProviderError(t *testing.T) {
 }
 
 // fakeBuildRunner lets tests control what QAAgent.Execute's real-build check
-// sees without shelling out to Docker.
+// sees without shelling out to Docker, and records the files it was
+// actually given so tests can assert on what got sent to "the build".
 type fakeBuildRunner struct {
-	err      error
-	buildLog string
+	err       error
+	buildLog  string
+	gotFiles  map[string]string
+	callCount int
 }
 
-func (f *fakeBuildRunner) Build(_ context.Context, _ uuid.UUID, _ map[string]string) (map[string]string, string, error) {
+func (f *fakeBuildRunner) Build(_ context.Context, _ uuid.UUID, files map[string]string) (map[string]string, string, error) {
+	f.callCount++
+	f.gotFiles = files
 	if f.err != nil {
 		return nil, f.buildLog, f.err
 	}
@@ -449,5 +454,59 @@ func TestQAAgentExecute_NoBuilderConfigured_FallsBackToLLMPath(t *testing.T) {
 	}
 	if !out.Passed {
 		t.Errorf("expected Passed=true, got issues: %+v", out.Issues)
+	}
+}
+
+// TestQAAgentExecute_ForcesTsConfigPathAlias_BeforeBuild is a regression
+// test for the ACTUAL root cause behind every "Module not found" build
+// failure chased this session (v27, v28, v30, v31 in production): the LLM
+// generated a tsconfig.json with no "baseUrl"/"paths" mapping for the
+// "@/*" alias every generated file's imports rely on (e.g.
+// "@/components/Header"). Without it, Next.js's webpack build can't
+// resolve ANY "@/..." import — producing the exact same "Module not
+// found: Can't resolve '@/components/X'" error a genuinely missing
+// component file would, even though the component files were confirmed
+// present (verified directly against production's agent_steps.input JSON
+// for this exact run). No amount of missing-component self-heal or
+// per-file repair can fix this, because the files being "healed" were
+// never the actual problem. QAAgent.Execute must now force-correct
+// tsconfig.json before ever running a real build, regardless of what the
+// LLM wrote.
+func TestQAAgentExecute_ForcesTsConfigPathAlias_BeforeBuild(t *testing.T) {
+	// The fake build "succeeds" (nil error) once its tsconfig.json is
+	// corrected, so Execute falls through to the LLM link/a11y pass same
+	// as any other successful build — give it a real response to reach.
+	srv := newJSONServer(t, `{"passed":true,"issues":[]}`)
+	defer srv.Close()
+	provider := ai.NewOpenRouterProvider(ai.ProviderConfig{APIKey: "k", BaseURL: srv.URL})
+	agent, err := agents.NewQAAgent(provider, "test-model")
+	if err != nil {
+		t.Fatalf("NewQAAgent: %v", err)
+	}
+
+	fake := &fakeBuildRunner{}
+	agents.SetBuilder(fake)
+	defer agents.SetBuilder(nil)
+
+	brokenTsConfig := `{"compilerOptions":{"target":"es5","strict":true}}`
+	out, err := agent.Execute(context.Background(), temporal.QAInput{
+		AppKind: "website",
+		Files: map[string]string{
+			"tsconfig.json":             brokenTsConfig,
+			"src/app/page.tsx":          `import Header from "@/components/Header"`,
+			"src/components/Header.tsx": "export default function Header() { return null }",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !out.Passed {
+		t.Fatalf("expected build to pass once tsconfig.json is force-corrected, got issues: %+v", out.Issues)
+	}
+	if fake.gotFiles["tsconfig.json"] == brokenTsConfig {
+		t.Fatal("tsconfig.json was sent to the build unmodified — the missing @/* path alias was never corrected")
+	}
+	if !strings.Contains(fake.gotFiles["tsconfig.json"], `"@/*"`) {
+		t.Fatalf("corrected tsconfig.json still missing the @/* path alias: %s", fake.gotFiles["tsconfig.json"])
 	}
 }

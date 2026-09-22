@@ -44,7 +44,32 @@ Generate ONLY the shared/root files — do NOT generate any page route files or 
   Do NOT invent different version numbers, add/remove dependencies, or use Tailwind v4/Next 15+ syntax anywhere — the rest of your output (globals.css, tailwind config) must match Tailwind v3's conventions (`@tailwind base; @tailwind components; @tailwind utilities;` in globals.css, a `tailwind.config.js` with a `content` array), not v4's.
 - `tailwind.config.js` (CommonJS, Tailwind v3 syntax: `content`, `theme.extend`, `module.exports = {...}`)
 - `postcss.config.js` (CommonJS: `module.exports = { plugins: { tailwindcss: {}, autoprefixer: {} } }`)
-- `next.config.js`, `tsconfig.json`
+- `next.config.js` (must include `output: 'export'`)
+- `tsconfig.json` — every other file you and the other parallel calls generate imports shared code via the `@/*` alias (e.g. `@/components/Header`), which ONLY resolves if `baseUrl`/`paths` are set correctly — get this wrong and EVERY `@/...` import in the whole app fails to build with "Module not found", even though the files genuinely exist. Emit this EXACT content, verbatim:
+  ```json
+  {
+    "compilerOptions": {
+      "target": "es5",
+      "lib": ["dom", "dom.iterable", "esnext"],
+      "allowJs": true,
+      "skipLibCheck": true,
+      "strict": true,
+      "forceConsistentCasingInFileNames": true,
+      "noEmit": true,
+      "esModuleInterop": true,
+      "module": "esnext",
+      "moduleResolution": "bundler",
+      "resolveJsonModule": true,
+      "isolatedModules": true,
+      "jsx": "preserve",
+      "incremental": true,
+      "baseUrl": ".",
+      "paths": { "@/*": ["src/*"] }
+    },
+    "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx"],
+    "exclude": ["node_modules"]
+  }
+  ```
 - `src/app/layout.tsx`, `src/app/globals.css` (layout.tsx should import and use whichever top-level/layout components — e.g. Header, Footer — appear in the Plan spec's component list, from `@/components/<Name>` by the exact PascalCase names — they are generated separately, just reference them)
 {{if eq .AppKind "pwa"}}- `public/manifest.json` and `public/sw.js` (see PWA requirements below){{end}}
 {{end}}
