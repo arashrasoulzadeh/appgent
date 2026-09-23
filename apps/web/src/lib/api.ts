@@ -151,6 +151,16 @@ class ApiClient {
     )
     return response.data
   }
+
+  // Per-file prompt-driven edit — not raw content. Produces a new run
+  // version; never mutates runId's own files in place.
+  async editFile(appId: string, runId: string, filePath: string, prompt: string) {
+    const response = await this.client.post<{ run: Run }>(
+      `/apps/${appId}/runs/${runId}/edit-file`,
+      { file_path: filePath, prompt }
+    )
+    return response.data
+  }
 }
 
 export const api = new ApiClient()

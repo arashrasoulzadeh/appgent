@@ -174,12 +174,10 @@ func (h *PreviewHandler) GetPreviewURL(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetRunFiles returns a run's raw generated source files, keyed by path, so
-// the frontend's file-manager tab can list and display them. Read-only —
-// there is no corresponding "write" endpoint; changing a generated app is
-// always done via a new prompt and a regenerate/redeploy, never an
-// in-place edit here (an edit would silently diverge from what the LLM
-// actually generated and reasoned about, and wouldn't survive the next
-// regenerate anyway).
+// the frontend's file-manager tab can list and display them. There is no
+// "write this content" endpoint — changing a file always goes through
+// EditFile below (a prompt, not raw content), which produces a new run
+// version rather than mutating this one's files in place.
 func (h *PreviewHandler) GetRunFiles(w http.ResponseWriter, r *http.Request) {
 	userIDStr, ok := middleware.GetUserID(r)
 	if !ok {
@@ -218,6 +216,69 @@ func (h *PreviewHandler) GetRunFiles(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"files": files})
+}
+
+// EditFile applies a per-file prompt from the file manager's prompt box —
+// never raw content — to exactly one file, producing a NEW run version the
+// user can review/deploy like any other generation. Returns 202 (like
+// RegenerateApp) since this dispatches an async Temporal workflow rather
+// than completing the edit synchronously.
+func (h *PreviewHandler) EditFile(w http.ResponseWriter, r *http.Request) {
+	userIDStr, ok := middleware.GetUserID(r)
+	if !ok {
+		http.Error(w, `{"error": "unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+	userID, err := uuid.Parse(userIDStr)
+	if err != nil {
+		http.Error(w, `{"error": "invalid user id"}`, http.StatusBadRequest)
+		return
+	}
+	appID, err := uuid.Parse(r.PathValue("app_id"))
+	if err != nil {
+		http.Error(w, `{"error": "invalid app id"}`, http.StatusBadRequest)
+		return
+	}
+	runID, err := uuid.Parse(r.PathValue("run_id"))
+	if err != nil {
+		http.Error(w, `{"error": "invalid run id"}`, http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		FilePath string `json:"file_path"`
+		Prompt   string `json:"prompt"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error": "invalid request"}`, http.StatusBadRequest)
+		return
+	}
+
+	run, err := h.appService.EditFile(r.Context(), userID, appID, runID, req.FilePath, req.Prompt)
+	if err != nil {
+		if errors.Is(err, services.ErrAppNotFound) {
+			http.Error(w, `{"error": "app not found"}`, http.StatusNotFound)
+			return
+		}
+		if errors.Is(err, services.ErrRunNotFound) {
+			http.Error(w, `{"error": "run not found"}`, http.StatusNotFound)
+			return
+		}
+		if req.Prompt == "" {
+			http.Error(w, `{"error": "prompt is required"}`, http.StatusBadRequest)
+			return
+		}
+		if req.FilePath == "" {
+			http.Error(w, `{"error": "file path is required"}`, http.StatusBadRequest)
+			return
+		}
+		http.Error(w, `{"error": "failed to edit file"}`, http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]interface{}{"run": run})
 }
 
 // ServeRunFile streams one file from a run's published bundle. Requires

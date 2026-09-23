@@ -58,6 +58,8 @@ export default function AppDetailPage() {
   const [filesForRunId, setFilesForRunId] = useState<string | null>(null)
   const [filesLoading, setFilesLoading] = useState(false)
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null)
+  const [editPrompt, setEditPrompt] = useState("")
+  const [editSubmitting, setEditSubmitting] = useState(false)
 
   // Tracks the appId that each in-flight fetch was started for, so that
   // responses for a stale appId (e.g. the user navigated to a different
@@ -216,6 +218,25 @@ export default function AppDetailPage() {
       toast({ title: "Failed to regenerate", description: apiErrorMessage(err, "Unknown error"), variant: "destructive" })
     } finally {
       setRegenerating(false)
+    }
+  }
+
+  const handleEditFile = async (e?: React.FormEvent) => {
+    e?.preventDefault()
+    if (!selectedRun || !selectedFilePath || !editPrompt.trim()) return
+    setEditSubmitting(true)
+    try {
+      const { run } = await api.editFile(appId, selectedRun.id, selectedFilePath, editPrompt.trim())
+      setEditPrompt("")
+      setSelectedRun(run)
+      loadRunDetails(run.id)
+      loadRuns()
+      setActiveTab("preview")
+      toast({ title: "Edit started", description: `Version ${run.version} is now queued — applying your change to ${selectedFilePath}` })
+    } catch (err) {
+      toast({ title: "Failed to start edit", description: apiErrorMessage(err, "Unknown error"), variant: "destructive" })
+    } finally {
+      setEditSubmitting(false)
     }
   }
 
@@ -462,7 +483,7 @@ export default function AppDetailPage() {
             ) : (
               <div className="space-y-3">
                 <p className="text-sm text-neutral-500 dark:text-neutral-400">
-                  Read-only. To change something, describe what you want in Regenerate — this view can&apos;t be edited directly.
+                  Code is read-only here. To change a file, describe what you want below — it applies to that ONE file and creates a new version to review and deploy.
                 </p>
                 <div className="flex gap-4 bg-white dark:bg-neutral-900 rounded-xl border border-neutral-200 dark:border-neutral-800 overflow-hidden" style={{ height: "70vh" }}>
                   <div className="w-64 shrink-0 overflow-y-auto border-r border-neutral-200 dark:border-neutral-800 py-2">
@@ -482,15 +503,31 @@ export default function AppDetailPage() {
                       </button>
                     ))}
                   </div>
-                  <div className="flex-1 overflow-auto">
+                  <div className="flex-1 flex flex-col min-w-0">
                     {selectedFilePath && (
                       <>
-                        <div className="sticky top-0 px-4 py-2 text-xs font-mono text-neutral-500 dark:text-neutral-400 bg-neutral-50 dark:bg-neutral-800/50 border-b border-neutral-200 dark:border-neutral-800">
+                        <div className="shrink-0 px-4 py-2 text-xs font-mono text-neutral-500 dark:text-neutral-400 bg-neutral-50 dark:bg-neutral-800/50 border-b border-neutral-200 dark:border-neutral-800">
                           {selectedFilePath}
                         </div>
-                        <pre className="p-4 text-sm font-mono whitespace-pre-wrap break-words text-neutral-800 dark:text-neutral-200">
+                        <pre className="flex-1 overflow-auto p-4 text-sm font-mono whitespace-pre-wrap break-words text-neutral-800 dark:text-neutral-200">
                           {runFiles[selectedFilePath]}
                         </pre>
+                        <form
+                          onSubmit={handleEditFile}
+                          className="shrink-0 flex items-center gap-2 p-3 border-t border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800/50"
+                        >
+                          <input
+                            type="text"
+                            value={editPrompt}
+                            onChange={(e) => setEditPrompt(e.target.value)}
+                            placeholder={`Describe a change to ${selectedFilePath}…`}
+                            disabled={editSubmitting}
+                            className="flex-1 min-w-0 px-3 py-2 text-sm rounded-md border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 text-neutral-900 dark:text-white placeholder:text-neutral-400"
+                          />
+                          <Button type="submit" size="sm" disabled={editSubmitting || !editPrompt.trim()}>
+                            {editSubmitting ? <Loader2 className="h-3 w-3 animate-spin" /> : "Apply"}
+                          </Button>
+                        </form>
                       </>
                     )}
                   </div>

@@ -70,6 +70,7 @@ func main() {
 
 	w.RegisterWorkflow(temporal.GenerateAppWorkflow)
 	w.RegisterWorkflow(temporal.RedeployWorkflow)
+	w.RegisterWorkflow(temporal.EditFileWorkflow)
 	w.RegisterActivityWithOptions(agents.PlanActivity, activity.RegisterOptions{Name: "PlanActivity"})
 	w.RegisterActivityWithOptions(agents.DesignActivity, activity.RegisterOptions{Name: "DesignActivity"})
 	w.RegisterActivityWithOptions(agents.CodeActivity, activity.RegisterOptions{Name: "CodeActivity"})

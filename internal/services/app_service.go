@@ -498,6 +498,96 @@ func (s *AppService) Regenerate(ctx context.Context, userID, appID uuid.UUID, pr
 	return run, nil
 }
 
+// EditFile applies a user-authored prompt to exactly one file from
+// sourceRunID, producing a NEW run version — never an in-place edit of
+// sourceRunID's own files, so an edit gets the same review/deploy/history
+// treatment as any other generation (and the old version stays intact if
+// the edit turns out wrong). Mirrors Regenerate's transaction pattern.
+func (s *AppService) EditFile(ctx context.Context, userID, appID, sourceRunID uuid.UUID, filePath, prompt string) (*Run, error) {
+	if prompt == "" {
+		return nil, fmt.Errorf("prompt is required")
+	}
+	if filePath == "" {
+		return nil, fmt.Errorf("file path is required")
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	var appExists bool
+	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM apps WHERE id = $1 AND user_id = $2)`, appID, userID).Scan(&appExists)
+	if err != nil {
+		return nil, err
+	}
+	if !appExists {
+		return nil, ErrAppNotFound
+	}
+
+	// Confirms sourceRunID both exists and belongs to this app — without
+	// this, a user could point an edit at another app's run entirely.
+	var exists bool
+	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM generation_runs WHERE id = $1 AND app_id = $2)`, sourceRunID, appID).Scan(&exists)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrRunNotFound
+	}
+
+	var version int
+	err = tx.QueryRow(ctx, `SELECT COALESCE(MAX(version), 0) + 1 FROM generation_runs WHERE app_id = $1`, appID).Scan(&version)
+	if err != nil {
+		return nil, err
+	}
+
+	runID := uuid.New()
+	workflowID := "edit-" + runID.String()
+	userPrompt := fmt.Sprintf("Edit %s: %s", filePath, prompt)
+
+	run := &Run{}
+	err = tx.QueryRow(ctx, `
+		INSERT INTO generation_runs (id, app_id, version, user_prompt, status, temporal_workflow_id)
+		VALUES ($1, $2, $3, $4, 'queued', $5)
+		RETURNING id, app_id, version, user_prompt, status, temporal_workflow_id, bundle_path, preview_url, error, started_at, finished_at, created_at
+	`, runID, appID, version, userPrompt, workflowID).Scan(
+		&run.ID, &run.AppID, &run.Version, &run.UserPrompt, &run.Status, &run.TemporalWorkflowID,
+		&run.BundlePath, &run.PreviewURL, &run.Error, &run.StartedAt, &run.FinishedAt, &run.CreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = tx.Exec(ctx, `UPDATE apps SET status = 'generating', updated_at = now() WHERE id = $1`, appID)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	_, err = s.temporal.ExecuteWorkflow(ctx, temporalclient.StartWorkflowOptions{
+		ID:        workflowID,
+		TaskQueue: generationTaskQueue,
+	}, apptemporal.EditFileWorkflow, apptemporal.EditFileInput{
+		AppID:       appID,
+		NewRunID:    runID,
+		SourceRunID: sourceRunID,
+		FilePath:    filePath,
+		Prompt:      prompt,
+	})
+	if err != nil {
+		s.pool.Exec(ctx, `UPDATE generation_runs SET status = 'failed', error = $2 WHERE id = $1`, runID, err.Error())
+		s.pool.Exec(ctx, `UPDATE apps SET status = 'failed', updated_at = now() WHERE id = $1`, appID)
+		return nil, err
+	}
+
+	return run, nil
+}
+
 func (s *AppService) GetRuns(ctx context.Context, userID, appID uuid.UUID) ([]*Run, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT r.id, r.app_id, r.version, r.user_prompt, r.status, r.temporal_workflow_id, r.bundle_path, r.preview_url, r.error, r.started_at, r.finished_at, r.created_at

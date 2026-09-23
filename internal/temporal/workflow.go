@@ -416,6 +416,27 @@ type RedeployResult struct {
 	Error  string
 }
 
+// EditFileInput/Result drive EditFileWorkflow — triggered by the file
+// manager's per-file prompt box. Always creates a NEW run version (NewRunID
+// is already inserted as 'queued' by AppService.EditFile before this
+// workflow starts, same as Regenerate) rather than mutating SourceRunID's
+// own files in place, so an edit has the same review/deploy/history
+// treatment as any other generation.
+type EditFileInput struct {
+	AppID       uuid.UUID
+	NewRunID    uuid.UUID
+	SourceRunID uuid.UUID
+	FilePath    string
+	Prompt      string
+}
+
+type EditFileResult struct {
+	Status     string // "succeeded", "needs_review", or "failed"
+	Error      string
+	BundlePath string
+	SourcePath string
+}
+
 type FetchRunSourceInput struct {
 	RunID uuid.UUID
 }
@@ -1184,5 +1205,135 @@ func RedeployWorkflow(ctx workflow.Context, in RedeployInput) (result RedeployRe
 	}
 
 	result = RedeployResult{Status: "live"}
+	return result, nil
+}
+
+// EditFileWorkflow applies a user-authored, per-file prompt (from the file
+// manager's read-only view — never a direct edit, per the product
+// decision) to exactly one file, using the SAME machinery as
+// buildWithRepair's real-build-error-driven repair, except the "feedback"
+// here is the user's own request rather than a parsed build error. Always
+// produces a NEW run version (in.NewRunID) so an edit gets the same
+// review/deploy/history treatment as any other generation, never mutating
+// SourceRunID's own files in place.
+func EditFileWorkflow(ctx workflow.Context, in EditFileInput) (result EditFileResult, err error) {
+	ao := workflow.ActivityOptions{
+		StartToCloseTimeout: 15 * time.Minute,
+		RetryPolicy: &temporal.RetryPolicy{
+			MaximumAttempts: 2,
+			InitialInterval: 5 * time.Second,
+		},
+	}
+	ctx = workflow.WithActivityOptions(ctx, ao)
+
+	// Persist on every exit path, same as GenerateAppWorkflow — keeps
+	// generation_runs.status in sync regardless of how this returns.
+	// PersistRunResultActivity's registered signature takes a
+	// temporal.GenerateAppResult specifically, not EditFileResult, so this
+	// builds that shape from the same final values rather than reusing
+	// `result` directly.
+	var persistSpec PlanOutput
+	defer func() {
+		persistCtx, cancel := workflow.NewDisconnectedContext(ctx)
+		defer cancel()
+		persistCtx = workflow.WithActivityOptions(persistCtx, ao)
+		persistErr := workflow.ExecuteActivity(persistCtx, persistActivityName, in.NewRunID, in.AppID, GenerateAppResult{
+			Status:     result.Status,
+			Error:      result.Error,
+			BundlePath: result.BundlePath,
+			SourcePath: result.SourcePath,
+			Spec:       persistSpec,
+		}).Get(persistCtx, nil)
+		if persistErr != nil && err == nil {
+			err = persistErr
+		}
+	}()
+
+	var srcOut FetchRunSourceOutput
+	if err = workflow.ExecuteActivity(ctx, fetchRunSourceActivityName, FetchRunSourceInput{RunID: in.SourceRunID}).Get(ctx, &srcOut); err != nil {
+		result = EditFileResult{Status: "failed", Error: err.Error()}
+		return result, err
+	}
+	persistSpec = srcOut.Spec
+	if len(srcOut.Spec.Pages) == 0 {
+		err = fmt.Errorf("this run predates per-file editing support (no Plan spec was saved) — regenerate the app once first")
+		result = EditFileResult{Status: "failed", Error: err.Error()}
+		return result, err
+	}
+
+	// Scope the edit to exactly the right target, same matching
+	// repairBuildFailure uses — a page's own file, a component's own
+	// file, or (matching neither) the shared/root target, so an edit to
+	// e.g. next.config.js or layout.tsx still goes to a real,
+	// correctly-scoped call rather than being silently dropped.
+	var target codeTarget
+	if page, ok := findPageForFile(srcOut.Spec.Pages, in.FilePath); ok {
+		target = codeTarget{page: &page}
+	} else if name, ok := componentNameForFile(in.FilePath); ok {
+		for _, c := range srcOut.Spec.Components {
+			if c.Name == name {
+				comp := c
+				target = codeTarget{component: &comp}
+				break
+			}
+		}
+	}
+
+	var codeOut CodeOutput
+	codeErr := workflow.ExecuteActivity(ctx, codeActivityName, CodeInput{
+		RunID:      in.NewRunID,
+		Attempt:    1,
+		Spec:       srcOut.Spec,
+		PriorFiles: srcOut.Files,
+		QAFeedback: []QAIssue{{
+			File:     in.FilePath,
+			Severity: "blocking",
+			Message:  in.Prompt,
+		}},
+		AppKind:         srcOut.AppKind,
+		TargetPage:      target.page,
+		TargetComponent: target.component,
+	}).Get(ctx, &codeOut)
+	if codeErr != nil {
+		err = codeErr
+		result = EditFileResult{Status: "failed", Error: err.Error()}
+		return result, err
+	}
+
+	merged := make(map[string]string, len(srcOut.Files))
+	for k, v := range srcOut.Files {
+		merged[k] = v
+	}
+	for path, content := range codeOut.Files {
+		merged[path] = content
+	}
+
+	// Same guarantee as generation's own first publish attempt: don't
+	// just accept whatever the edit produced if it happens to break the
+	// build — repair via the real build error first.
+	builtFiles, pubOut, _, buildErr := buildWithRepair(ctx, in.NewRunID, in.AppID, srcOut.Spec, srcOut.AppKind, merged)
+
+	status := "succeeded"
+	errMsg := ""
+	bundlePath := ""
+	if buildErr != nil {
+		status = "needs_review"
+		errMsg = buildErr.Error()
+		builtFiles = merged
+	} else {
+		bundlePath = pubOut.BundlePath
+	}
+
+	var srcSaveOut PublishSourceOutput
+	if srcSaveErr := workflow.ExecuteActivity(ctx, publishSourceActivityName, PublishSourceInput{
+		RunID: in.NewRunID,
+		Files: builtFiles,
+	}).Get(ctx, &srcSaveOut); srcSaveErr != nil {
+		err = srcSaveErr
+		result = EditFileResult{Status: "failed", Error: err.Error()}
+		return result, err
+	}
+
+	result = EditFileResult{Status: status, Error: errMsg, BundlePath: bundlePath, SourcePath: srcSaveOut.SourcePath}
 	return result, nil
 }

@@ -150,6 +150,77 @@ func TestAppService_Delete_Integration(t *testing.T) {
 	assert.Equal(t, services.ErrAppNotFound, err)
 }
 
+// TestAppService_EditFile_ValidatesInput is a plain unit test (no DB/
+// Temporal needed — EditFile validates prompt/filePath before touching
+// either) confirming empty input is rejected before anything is created.
+func TestAppService_EditFile_ValidatesInput(t *testing.T) {
+	service := services.NewAppService(nil, nil)
+	ctx := context.Background()
+	someID := uuid.New()
+
+	_, err := service.EditFile(ctx, someID, someID, someID, "src/app/page.tsx", "")
+	assert.Error(t, err, "empty prompt must be rejected")
+
+	_, err = service.EditFile(ctx, someID, someID, someID, "", "make it blue")
+	assert.Error(t, err, "empty file path must be rejected")
+}
+
+// TestAppService_EditFile_CreatesNewRunVersion_Integration confirms EditFile
+// produces a NEW run version (never mutating the source run) with a
+// user_prompt that records both the target file and the user's request, so
+// it reads meaningfully in the History tab.
+func TestAppService_EditFile_CreatesNewRunVersion_Integration(t *testing.T) {
+	dsn := "postgres://appgent:appgent@localhost:5433/appgent?sslmode=disable"
+	ctx := context.Background()
+
+	pool, err := db.NewPool(ctx, dsn)
+	if err != nil {
+		t.Skipf("Database not available: %v", err)
+	}
+	defer pool.Close()
+
+	service := newTestAppService(t, pool)
+	userID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+
+	app, run1, err := service.Create(ctx, userID, "Edit File Test", "website", "Original prompt")
+	require.NoError(t, err)
+	defer service.Delete(ctx, userID, app.ID)
+
+	run2, err := service.EditFile(ctx, userID, app.ID, run1.ID, "src/app/page.tsx", "make the heading bigger")
+	require.NoError(t, err)
+	assert.Equal(t, 2, run2.Version)
+	assert.Equal(t, "queued", run2.Status)
+	assert.Contains(t, run2.UserPrompt, "src/app/page.tsx")
+	assert.Contains(t, run2.UserPrompt, "make the heading bigger")
+	assert.NotEqual(t, run1.ID, run2.ID, "must be a NEW run, never the source run mutated in place")
+}
+
+// TestAppService_EditFile_CrossUser_Integration guards against the same
+// IDOR class of bug as every other cross-user test in this file — an
+// attacker naming another user's app_id (with any source_run_id) must get
+// ErrAppNotFound, never a successful edit against someone else's app.
+func TestAppService_EditFile_CrossUser_Integration(t *testing.T) {
+	dsn := "postgres://appgent:appgent@localhost:5433/appgent?sslmode=disable"
+	ctx := context.Background()
+
+	pool, err := db.NewPool(ctx, dsn)
+	if err != nil {
+		t.Skipf("Database not available: %v", err)
+	}
+	defer pool.Close()
+
+	service := newTestAppService(t, pool)
+	ownerID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	attackerID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
+
+	app, run, err := service.Create(ctx, ownerID, "Cross User Edit", "website", "Test")
+	require.NoError(t, err)
+	defer service.Delete(ctx, ownerID, app.ID)
+
+	_, err = service.EditFile(ctx, attackerID, app.ID, run.ID, "src/app/page.tsx", "change it")
+	assert.ErrorIs(t, err, services.ErrAppNotFound, "EditFile must not let an attacker act on another user's app")
+}
+
 func TestAppService_Regenerate_Integration(t *testing.T) {
 	dsn := "postgres://appgent:appgent@localhost:5433/appgent?sslmode=disable"
 	ctx := context.Background()

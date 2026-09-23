@@ -110,6 +110,7 @@ func main() {
 	protected.HandleFunc("GET /api/v1/apps/{app_id}/runs/{run_id}/preview", previewHandler.GetPreviewURL)
 	protected.HandleFunc("GET /api/v1/apps/{app_id}/runs/{run_id}/preview/{path...}", previewHandler.ServeRunFile)
 	protected.HandleFunc("GET /api/v1/apps/{app_id}/runs/{run_id}/files", previewHandler.GetRunFiles)
+	protected.HandleFunc("POST /api/v1/apps/{app_id}/runs/{run_id}/edit-file", previewHandler.EditFile)
 
 	// Apply middleware chain
 	handler := middleware.CORSMiddleware(cfg.CORSAllowedOrigin)(

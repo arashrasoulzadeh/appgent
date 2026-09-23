@@ -986,6 +986,103 @@ func TestRedeployWorkflow_BuildFailure_RepairExhausted_MarksFailed(t *testing.T)
 	env.AssertNotCalled(t, "PromoteDeploymentActivity", mock.Anything, mock.Anything)
 }
 
+// TestEditFileWorkflow_EditsPageAndPublishes_NewRunVersion covers the file
+// manager's per-file prompt box end-to-end: the prompt must reach the
+// CORRECT target's own CodeActivity call (scoped exactly like a build
+// repair, via the same findPageForFile matching), the edit must merge onto
+// the rest of the source unchanged, and the result must publish under the
+// NEW run id, never overwriting SourceRunID's own files.
+func TestEditFileWorkflow_EditsPageAndPublishes_NewRunVersion(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := newTestEnv(&suite)
+
+	spec := apptemporal.PlanOutput{
+		Pages: []apptemporal.PageSpec{{Name: "Skills", Path: "/skills"}},
+	}
+	sourceFiles := map[string]string{
+		"src/app/skills/page.tsx": "export default function Skills() { return <p>Old</p> }",
+		"src/app/layout.tsx":      "export default function Layout({children}) { return children }",
+	}
+	env.OnActivity("FetchRunSourceActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.FetchRunSourceOutput{Files: sourceFiles, Spec: spec, AppKind: "website"}, nil)
+
+	env.OnActivity("CodeActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.CodeInput) (apptemporal.CodeOutput, error) {
+			require.NotNil(t, in.TargetPage, "edit must be scoped to the matching page target")
+			require.Equal(t, "/skills", in.TargetPage.Path)
+			require.Len(t, in.QAFeedback, 1)
+			require.Equal(t, "src/app/skills/page.tsx", in.QAFeedback[0].File)
+			require.Equal(t, "make the heading bigger", in.QAFeedback[0].Message, "the user's own prompt must reach CodeActivity verbatim")
+			return apptemporal.CodeOutput{Files: map[string]string{
+				"src/app/skills/page.tsx": "export default function Skills() { return <h1>New</h1> }",
+			}}, nil
+		})
+
+	var publishedRunID uuid.UUID
+	var publishedFiles map[string]string
+	env.OnActivity("PublishBundleActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.PublishBundleInput) (apptemporal.PublishBundleOutput, error) {
+			publishedRunID = in.RunID
+			publishedFiles = in.Files
+			return apptemporal.PublishBundleOutput{BundlePath: "runs/" + in.RunID.String() + "/"}, nil
+		})
+	env.OnActivity("PublishSourceActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.PublishSourceInput) (apptemporal.PublishSourceOutput, error) {
+			return apptemporal.PublishSourceOutput{SourcePath: "sources/" + in.RunID.String() + "/"}, nil
+		})
+	env.OnActivity("PersistRunResultActivity", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(nil)
+
+	newRunID := uuid.New()
+	sourceRunID := uuid.New()
+	in := apptemporal.EditFileInput{
+		AppID:       uuid.New(),
+		NewRunID:    newRunID,
+		SourceRunID: sourceRunID,
+		FilePath:    "src/app/skills/page.tsx",
+		Prompt:      "make the heading bigger",
+	}
+	env.ExecuteWorkflow(apptemporal.EditFileWorkflow, in)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	var result apptemporal.EditFileResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, "succeeded", result.Status)
+	require.Equal(t, newRunID, publishedRunID, "must publish under the NEW run, never the source run")
+	require.Contains(t, publishedFiles["src/app/skills/page.tsx"], "New", "the edit must be applied")
+	require.Contains(t, publishedFiles, "src/app/layout.tsx", "unrelated files must survive unchanged")
+
+	env.AssertExpectations(t)
+}
+
+// TestEditFileWorkflow_OldRunWithNoSpec_FailsWithClearError verifies a run
+// that predates spec persistence (see the redeploy-repair-loop work) can't
+// silently corrupt into an unscoped edit — it must fail clearly instead.
+func TestEditFileWorkflow_OldRunWithNoSpec_FailsWithClearError(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := newTestEnv(&suite)
+
+	env.OnActivity("FetchRunSourceActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.FetchRunSourceOutput{Files: map[string]string{"a.tsx": "x"}}, nil)
+	env.OnActivity("PersistRunResultActivity", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(nil)
+
+	env.ExecuteWorkflow(apptemporal.EditFileWorkflow, apptemporal.EditFileInput{
+		AppID:       uuid.New(),
+		NewRunID:    uuid.New(),
+		SourceRunID: uuid.New(),
+		FilePath:    "a.tsx",
+		Prompt:      "change it",
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.Error(t, env.GetWorkflowError())
+	require.Contains(t, env.GetWorkflowError().Error(), "predates per-file editing")
+	env.AssertNotCalled(t, "CodeActivity", mock.Anything, mock.Anything)
+}
+
 // TestGenerateAppWorkflow_MissingComponentImport_SelfHeals is a regression
 // test for a real production build failure: a page imported
 // "@/components/GhostThing", a name that was never in the Plan spec's
