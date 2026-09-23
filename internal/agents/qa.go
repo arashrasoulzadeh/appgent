@@ -114,6 +114,14 @@ func (a *QAAgent) Execute(ctx context.Context, in temporal.QAInput) (temporal.QA
 	// previous "assume it builds" behavior rather than erroring.
 	if builder != nil && len(in.Files) > 0 {
 		ensureTsConfigPathAlias(in.Files)
+		// basePath's actual value doesn't affect whether the build
+		// succeeds (only serving correctness later, handled at publish
+		// time via PublishBundleActivity, which has the real AppID) — but
+		// images.unoptimized DOES: `next/image`'s default loader is
+		// flatly incompatible with `output: 'export'` and Next.js hard-
+		// fails the build over it, so QA's own build-check needs this
+		// fix too, not just the final publish.
+		ensureNextConfigBasePath(in.Files, "")
 		if _, buildLog, buildErr := builder.Build(ctx, in.RunID, in.Files); buildErr != nil {
 			// A real, deterministic build failure is unambiguous — no need
 			// to spend an LLM call asking it to "interpret" a failure that

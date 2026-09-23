@@ -67,6 +67,51 @@ func ensureTsConfigPathAlias(files map[string]string) {
 	}
 }
 
+// nextConfigTemplate is the next.config.js content every generated app
+// gets, unconditionally — %s is the basePath. Two things the LLM has no
+// way to reliably get right even in principle (not just "sometimes
+// forgets", like tsconfig.json):
+//
+//   - basePath/assetPrefix: live deployments are served under
+//     "/api/v1/apps/<appID>/live", never domain root — but the LLM
+//     generates code with no idea what appID it's for or how deployment
+//     serving is structured, so it can't possibly emit the right value.
+//     Without it, EVERY "/_next/static/..." asset the static export
+//     references resolves against the wrong (root) path and 404s in
+//     production — confirmed live: chunk after chunk 404ing on a
+//     genuinely successful build/deploy.
+//   - images.unoptimized: `next/image` normally optimizes images through
+//     a server-side API route (`/_next/image`) — which doesn't exist for
+//     a static export (`output: 'export'`, no server at all). Without
+//     this, any `next/image` usage 400s in production (confirmed live:
+//     "GET /_next/image?... 400 (Bad Request)"), even though the build
+//     itself succeeds (the failure only ever surfaces at runtime, in the
+//     browser, not at build time).
+const nextConfigTemplate = `/** @type {import('next').NextConfig} */
+const nextConfig = {
+  output: 'export',
+  basePath: %q,
+  assetPrefix: %q,
+  trailingSlash: true,
+  images: { unoptimized: true },
+}
+
+module.exports = nextConfig
+`
+
+// ensureNextConfigBasePath deterministically (zero LLM tokens) force-sets
+// next.config.js to the correct basePath/assetPrefix/images config for
+// where this app is actually served, overwriting whatever the LLM wrote —
+// unlike ensureTsConfigPathAlias, this ALWAYS overwrites rather than only
+// filling a gap, because the correct value is deployment-specific and
+// never something the LLM could derive on its own in the first place, not
+// merely something it sometimes forgets. Mutates files in place; called
+// right before every real build, same call sites as
+// ensureTsConfigPathAlias.
+func ensureNextConfigBasePath(files map[string]string, basePath string) {
+	files["next.config.js"] = fmt.Sprintf(nextConfigTemplate, basePath, basePath)
+}
+
 // SetProvisioner wires the object-storage-backed provisioner used to
 // publish generated bundles. Called once from the worker's main() — see
 // services/worker/cmd/worker/main.go.
@@ -176,6 +221,7 @@ func PublishBundleActivity(ctx context.Context, in temporal.PublishBundleInput) 
 		return temporal.PublishBundleOutput{}, err
 	}
 	ensureTsConfigPathAlias(in.Files)
+	ensureNextConfigBasePath(in.Files, "/api/v1/apps/"+in.AppID.String()+"/live")
 
 	built, buildLog, err := builder.Build(ctx, in.RunID, in.Files)
 	if err != nil {

@@ -187,6 +187,44 @@ func TestPublishBundleActivity_ForcesTsConfigPathAlias_BeforeBuild(t *testing.T)
 	assert.Contains(t, gotTsConfig, `"@/*"`, "corrected tsconfig.json still missing the @/* path alias")
 }
 
+// TestPublishBundleActivity_ForcesNextConfigBasePath is a regression test
+// for a real production failure reported right after a successful deploy:
+// the app served correctly at index.html, but EVERY /_next/static/*.js
+// chunk 404'd, and next/image requests 400'd. Root cause: live
+// deployments are served under /api/v1/apps/<appID>/live/, not domain
+// root, but Next.js's static export always emits root-absolute asset
+// paths (/_next/static/...) unless told the real basePath — something
+// the LLM has no way to know at generation time (it doesn't know its own
+// future appID or how serving is structured), so this can never be fixed
+// by better prompting alone, unlike the tsconfig.json gap above. Also:
+// next/image's default loader is flatly incompatible with `output:
+// 'export'` without images.unoptimized — Next.js hard-fails the BUILD
+// over this, not just a runtime 400, if the app uses next/image at all.
+func TestPublishBundleActivity_ForcesNextConfigBasePath(t *testing.T) {
+	fp := &fakeProvisioner{}
+	fb := &fakeBuilder{buildFn: func(files map[string]string) (map[string]string, string, error) {
+		return files, "", nil
+	}}
+	setFakes(t, fp, fb)
+
+	appID := uuid.New()
+	_, err := agents.PublishBundleActivity(context.Background(), apptemporal.PublishBundleInput{
+		RunID: uuid.New(),
+		AppID: appID,
+		Files: map[string]string{
+			"next.config.js":   "module.exports = { output: 'export' }",
+			"src/app/page.tsx": "export default function Home() { return null }",
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, fb.calls, 1)
+	gotNextConfig := fb.calls[0]["next.config.js"]
+	wantBasePath := "/api/v1/apps/" + appID.String() + "/live"
+	assert.Contains(t, gotNextConfig, wantBasePath, "next.config.js must be force-corrected with this app's actual live basePath")
+	assert.Contains(t, gotNextConfig, "images", "must set images.unoptimized — next/image's default loader is incompatible with output:'export' and fails the BUILD, not just a runtime request")
+	assert.Contains(t, gotNextConfig, "unoptimized")
+}
+
 // TestPublishSourceActivity_ForcesTsConfigPathAlias is the same regression
 // as TestPublishBundleActivity_ForcesTsConfigPathAlias_BeforeBuild, but for
 // the SAVED source — so that a later RedeployWorkflow rebuild (which fetches

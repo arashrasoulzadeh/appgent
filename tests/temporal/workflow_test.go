@@ -133,6 +133,48 @@ func TestGenerateAppWorkflow_HappyPath(t *testing.T) {
 	env.AssertExpectations(t)
 }
 
+// TestGenerateAppWorkflow_PublishesWithCorrectAppID is a regression test
+// for a real production bug: the app deployed and served index.html fine,
+// but every /_next/static/*.js chunk 404'd because next.config.js's
+// basePath must match how live deployments are actually served
+// (/api/v1/apps/<appID>/live/) — and PublishBundleActivity can only
+// compute that correctly if the workflow actually threads AppID through
+// to it. (The deterministic basePath-correction logic itself is tested at
+// the activity level in tests/agents/publish_activity_test.go; this
+// confirms the workflow wiring that feeds it the right AppID.)
+func TestGenerateAppWorkflow_PublishesWithCorrectAppID(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := newTestEnv(&suite)
+
+	input := newInput()
+
+	env.OnActivity("PlanActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.PlanOutput{}, nil)
+	env.OnActivity("DesignActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.DesignOutput{}, nil)
+	env.OnActivity("CodeActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.CodeOutput{Files: map[string]string{"a.tsx": "x"}}, nil)
+	env.OnActivity("QAActivity", mock.Anything, mock.Anything).
+		Return(apptemporal.QAOutput{Passed: true}, nil)
+
+	var gotAppID uuid.UUID
+	env.OnActivity("PublishBundleActivity", mock.Anything, mock.Anything).
+		Return(func(_ context.Context, in apptemporal.PublishBundleInput) (apptemporal.PublishBundleOutput, error) {
+			gotAppID = in.AppID
+			return apptemporal.PublishBundleOutput{BundlePath: "runs/" + in.RunID.String() + "/"}, nil
+		})
+	env.OnActivity("PersistRunResultActivity", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(nil)
+
+	env.ExecuteWorkflow(apptemporal.GenerateAppWorkflow, input)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	require.Equal(t, input.AppID, gotAppID, "PublishBundleActivity must receive the real AppID, or it can't compute the correct basePath")
+
+	env.AssertExpectations(t)
+}
+
 // TestGenerateAppWorkflow_QARetryThenSucceeds verifies a failing QA pass
 // triggers a Code re-run with the QA feedback, and a subsequent pass
 // succeeds the workflow.

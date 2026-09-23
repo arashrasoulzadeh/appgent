@@ -307,10 +307,10 @@ const maxBuildRepairRetries = 3
 // Returns the (possibly repaired) files, the successful publish output,
 // whether any repair actually happened, and the final error (nil on
 // success).
-func buildWithRepair(ctx workflow.Context, runID uuid.UUID, spec PlanOutput, appKind string, files map[string]string) (finalFiles map[string]string, pubOut PublishBundleOutput, repaired bool, err error) {
+func buildWithRepair(ctx workflow.Context, runID, appID uuid.UUID, spec PlanOutput, appKind string, files map[string]string) (finalFiles map[string]string, pubOut PublishBundleOutput, repaired bool, err error) {
 	finalFiles = files
 	for attempt := 0; ; attempt++ {
-		err = workflow.ExecuteActivity(ctx, publishActivityName, PublishBundleInput{RunID: runID, Files: finalFiles}).Get(ctx, &pubOut)
+		err = workflow.ExecuteActivity(ctx, publishActivityName, PublishBundleInput{RunID: runID, AppID: appID, Files: finalFiles}).Get(ctx, &pubOut)
 		if err == nil {
 			return finalFiles, pubOut, repaired, nil
 		}
@@ -372,6 +372,12 @@ type GenerateAppResult struct {
 // served back for preview/deployment. See internal/agents.PublishBundleActivity.
 type PublishBundleInput struct {
 	RunID uuid.UUID
+	// AppID is needed to compute the correct next.config.js basePath —
+	// live deployments are served under /api/v1/apps/<AppID>/live/, not
+	// domain root, so Next's static export must be told that prefix or
+	// every /_next/static/... asset (and the /_next/image endpoint,
+	// which additionally needs images.unoptimized) 404s in production.
+	AppID uuid.UUID
 	Files map[string]string
 }
 
@@ -920,7 +926,7 @@ func GenerateAppWorkflow(ctx workflow.Context, in GenerateAppInput) (result Gene
 			// same repair loop RedeployWorkflow uses so a freshly
 			// generated run's very first publish attempt gets the same
 			// guarantee, not just a later manual retry.
-			builtFiles, pubOut, repaired, pubErr := buildWithRepair(publishCtx, in.RunID, planOutput, in.AppKind, codeOutput.Files)
+			builtFiles, pubOut, repaired, pubErr := buildWithRepair(publishCtx, in.RunID, in.AppID, planOutput, in.AppKind, codeOutput.Files)
 			if pubErr != nil {
 				workflow.GetLogger(ctx).Warn("publish bundle failed", "runID", in.RunID, "error", pubErr)
 			} else {
@@ -1145,7 +1151,7 @@ func RedeployWorkflow(ctx workflow.Context, in RedeployInput) (result RedeployRe
 		// possible when this run's Plan spec was actually persisted (see
 		// FetchRunSourceActivity) — runs from before that existed fall
 		// back to the previous give-up-immediately behavior.
-		files, pubOut, repaired, buildErr := buildWithRepair(ctx, in.RunID, srcOut.Spec, srcOut.AppKind, srcOut.Files)
+		files, pubOut, repaired, buildErr := buildWithRepair(ctx, in.RunID, in.AppID, srcOut.Spec, srcOut.AppKind, srcOut.Files)
 		if buildErr != nil {
 			err = buildErr
 			return result, err
