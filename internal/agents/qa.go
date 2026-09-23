@@ -122,6 +122,7 @@ func (a *QAAgent) Execute(ctx context.Context, in temporal.QAInput) (temporal.QA
 		// fails the build over it, so QA's own build-check needs this
 		// fix too, not just the final publish.
 		ensureNextConfigBasePath(in.Files, "")
+		ensureGlobalsCSSImported(in.Files)
 		if _, buildLog, buildErr := builder.Build(ctx, in.RunID, in.Files); buildErr != nil {
 			// A real, deterministic build failure is unambiguous — no need
 			// to spend an LLM call asking it to "interpret" a failure that

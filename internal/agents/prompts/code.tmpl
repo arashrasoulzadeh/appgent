@@ -70,7 +70,7 @@ Generate ONLY the shared/root files — do NOT generate any page route files or 
     "exclude": ["node_modules"]
   }
   ```
-- `src/app/layout.tsx`, `src/app/globals.css` (layout.tsx should import and use whichever top-level/layout components — e.g. Header, Footer — appear in the Plan spec's component list, from `@/components/<Name>` by the exact PascalCase names — they are generated separately, just reference them)
+- `src/app/layout.tsx`, `src/app/globals.css` — layout.tsx MUST start with `import "./globals.css"` as its first import, before anything else. Next.js only bundles CSS that's actually imported somewhere in the component tree — skip this and the ENTIRE app ships with zero CSS (no Tailwind, no custom styles, nothing) despite a fully successful build, since a missing CSS import is not a build error. layout.tsx should also import and use whichever top-level/layout components — e.g. Header, Footer — appear in the Plan spec's component list, from `@/components/<Name>` by the exact PascalCase names — they are generated separately, just reference them.
 {{if eq .AppKind "pwa"}}- `public/manifest.json` and `public/sw.js` (see PWA requirements below){{end}}
 {{end}}
 

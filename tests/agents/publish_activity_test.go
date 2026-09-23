@@ -225,6 +225,42 @@ func TestPublishBundleActivity_ForcesNextConfigBasePath(t *testing.T) {
 	assert.Contains(t, gotNextConfig, "unoptimized")
 }
 
+// TestPublishBundleActivity_ForcesGlobalsCSSImport is a regression test for
+// a real production failure that reached a genuinely successful deploy
+// with correctly-resolving JS chunks and everything: layout.tsx never
+// imported globals.css, so the app shipped with ZERO CSS — no <link
+// rel="stylesheet"> at all, confirmed directly on the live page (verified
+// via the built-in browser: document.querySelectorAll('link,style')
+// returned nothing but a script preload). Not a build failure — Next.js
+// happily builds an app that never imports its own stylesheet — so
+// nothing upstream (self-heal, QA's build check, the repair loop) could
+// ever have caught this; the build itself was perfect and still wrong.
+func TestPublishBundleActivity_ForcesGlobalsCSSImport(t *testing.T) {
+	fp := &fakeProvisioner{}
+	fb := &fakeBuilder{buildFn: func(files map[string]string) (map[string]string, string, error) {
+		return files, "", nil
+	}}
+	setFakes(t, fp, fb)
+
+	brokenLayout := `import Header from "@/components/Header";
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (<html><body><Header />{children}</body></html>);
+}`
+	_, err := agents.PublishBundleActivity(context.Background(), apptemporal.PublishBundleInput{
+		RunID: uuid.New(),
+		AppID: uuid.New(),
+		Files: map[string]string{
+			"src/app/layout.tsx":  brokenLayout,
+			"src/app/globals.css": "@tailwind base;\n@tailwind components;\n@tailwind utilities;",
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, fb.calls, 1)
+	gotLayout := fb.calls[0]["src/app/layout.tsx"]
+	assert.Contains(t, gotLayout, "globals.css", "layout.tsx must be force-corrected to import globals.css, or the deployed app ships with zero CSS")
+	assert.Contains(t, gotLayout, "Header", "the correction must not clobber the rest of the file's real content")
+}
+
 // TestPublishSourceActivity_ForcesTsConfigPathAlias is the same regression
 // as TestPublishBundleActivity_ForcesTsConfigPathAlias_BeforeBuild, but for
 // the SAVED source — so that a later RedeployWorkflow rebuild (which fetches

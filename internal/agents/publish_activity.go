@@ -112,6 +112,32 @@ func ensureNextConfigBasePath(files map[string]string, basePath string) {
 	files["next.config.js"] = fmt.Sprintf(nextConfigTemplate, basePath, basePath)
 }
 
+// ensureGlobalsCSSImported deterministically (zero LLM tokens) guarantees
+// layout.tsx imports globals.css, regardless of whether the LLM actually
+// followed code.tmpl's instruction to. Real production failure mode this
+// fixes: layout.tsx omitted the import entirely — Next.js only bundles CSS
+// that's actually imported somewhere in the component tree, so the build
+// succeeds perfectly (a missing CSS import isn't a build error at all) but
+// the deployed app ships with ZERO css — no <link rel="stylesheet">, no
+// Tailwind, nothing — confirmed live: a fully successful, correctly-
+// resolving deploy with a completely unstyled page. Mutates files in
+// place; called right before every real build, same call sites as
+// ensureTsConfigPathAlias/ensureNextConfigBasePath.
+func ensureGlobalsCSSImported(files map[string]string) {
+	layout, ok := files["src/app/layout.tsx"]
+	if !ok || strings.Contains(layout, "globals.css") {
+		return
+	}
+	if _, ok := files["src/app/globals.css"]; !ok {
+		// Nothing to import — code.tmpl requires this file too, but if
+		// it's somehow also missing, injecting an import for a
+		// nonexistent file would just trade one build failure for
+		// another, worse one.
+		return
+	}
+	files["src/app/layout.tsx"] = "import \"./globals.css\";\n" + layout
+}
+
 // SetProvisioner wires the object-storage-backed provisioner used to
 // publish generated bundles. Called once from the worker's main() — see
 // services/worker/cmd/worker/main.go.
@@ -142,6 +168,7 @@ func PublishSourceActivity(ctx context.Context, in temporal.PublishSourceInput) 
 		return temporal.PublishSourceOutput{}, fmt.Errorf("no files to publish")
 	}
 	ensureTsConfigPathAlias(in.Files)
+	ensureGlobalsCSSImported(in.Files)
 	if err := provisioner.ProvisionSource(ctx, in.RunID, in.Files); err != nil {
 		return temporal.PublishSourceOutput{}, fmt.Errorf("provision source: %w", err)
 	}
@@ -222,6 +249,7 @@ func PublishBundleActivity(ctx context.Context, in temporal.PublishBundleInput) 
 	}
 	ensureTsConfigPathAlias(in.Files)
 	ensureNextConfigBasePath(in.Files, "/api/v1/apps/"+in.AppID.String()+"/live")
+	ensureGlobalsCSSImported(in.Files)
 
 	built, buildLog, err := builder.Build(ctx, in.RunID, in.Files)
 	if err != nil {
