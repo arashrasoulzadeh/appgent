@@ -141,6 +141,16 @@ class ApiClient {
     )
     return response.data
   }
+
+  // Read-only: the file manager shows generated code, but there's no
+  // corresponding "save" call — changing a generated app is always done
+  // via a new prompt and a regenerate/redeploy, never an in-place edit.
+  async getRunFiles(appId: string, runId: string) {
+    const response = await this.client.get<{ files: Record<string, string> }>(
+      `/apps/${appId}/runs/${runId}/files`
+    )
+    return response.data
+  }
 }
 
 export const api = new ApiClient()

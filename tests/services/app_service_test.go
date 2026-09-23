@@ -364,6 +364,94 @@ func TestAppService_GetPreviewURL_CrossUser_Integration(t *testing.T) {
 	assert.ErrorIs(t, err, services.ErrRunNotFound, "GetPreviewURL must not leak another user's run")
 }
 
+// fakeSourceProvisioner is a minimal sandbox.Provisioner for testing
+// GetRunSourceFiles without real object storage.
+type fakeSourceProvisioner struct {
+	files map[string]string
+	err   error
+}
+
+func (f *fakeSourceProvisioner) ProvisionSource(context.Context, uuid.UUID, map[string]string) error {
+	return nil
+}
+func (f *fakeSourceProvisioner) FetchSource(context.Context, uuid.UUID) (map[string]string, error) {
+	return f.files, f.err
+}
+func (f *fakeSourceProvisioner) Provision(context.Context, uuid.UUID, map[string]string) error {
+	return nil
+}
+func (f *fakeSourceProvisioner) Promote(context.Context, uuid.UUID, uuid.UUID) error { return nil }
+func (f *fakeSourceProvisioner) Teardown(context.Context, uuid.UUID) error           { return nil }
+
+// TestAppService_GetRunSourceFiles_CrossUser_Integration guards against the
+// same IDOR class of bug as GetPreviewURL/GetRunWithSteps above — the file
+// browser's whole point is showing a run's generated source, so it must
+// never do that for a run the caller doesn't own.
+func TestAppService_GetRunSourceFiles_CrossUser_Integration(t *testing.T) {
+	dsn := "postgres://appgent:appgent@localhost:5433/appgent?sslmode=disable"
+	ctx := context.Background()
+
+	pool, err := db.NewPool(ctx, dsn)
+	if err != nil {
+		t.Skipf("Database not available: %v", err)
+	}
+	defer pool.Close()
+
+	service := newTestAppService(t, pool)
+	service.SetProvisioner(&fakeSourceProvisioner{files: map[string]string{"src/app/page.tsx": "x"}})
+	ownerID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	attackerID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
+
+	app, run, err := service.Create(ctx, ownerID, "Cross User Files", "website", "Test")
+	require.NoError(t, err)
+	defer service.Delete(ctx, ownerID, app.ID)
+
+	// No source_path has been set yet (generation hasn't run in this
+	// test), so the owner gets ErrNoPreview — proving the row itself was
+	// found for them, just with nothing to show yet.
+	_, err = service.GetRunSourceFiles(ctx, ownerID, app.ID, run.ID)
+	assert.ErrorIs(t, err, services.ErrNoPreview)
+
+	// A different user must get ErrRunNotFound, i.e. the row must appear
+	// invisible to them entirely, not merely lacking source.
+	_, err = service.GetRunSourceFiles(ctx, attackerID, app.ID, run.ID)
+	assert.ErrorIs(t, err, services.ErrRunNotFound, "GetRunSourceFiles must not leak another user's run")
+}
+
+// TestAppService_GetRunSourceFiles_ReturnsProvisionerFiles_Integration
+// confirms the actual wiring: once a run has a source_path, the real files
+// from the provisioner come back, keyed by path — this is what the
+// read-only file-manager tab renders.
+func TestAppService_GetRunSourceFiles_ReturnsProvisionerFiles_Integration(t *testing.T) {
+	dsn := "postgres://appgent:appgent@localhost:5433/appgent?sslmode=disable"
+	ctx := context.Background()
+
+	pool, err := db.NewPool(ctx, dsn)
+	if err != nil {
+		t.Skipf("Database not available: %v", err)
+	}
+	defer pool.Close()
+
+	wantFiles := map[string]string{
+		"src/app/page.tsx":          "export default function Home() { return null }",
+		"src/components/Header.tsx": "export default function Header() { return null }",
+	}
+	service := newTestAppService(t, pool)
+	service.SetProvisioner(&fakeSourceProvisioner{files: wantFiles})
+	userID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+
+	app, run, err := service.Create(ctx, userID, "Files Return Test", "website", "Test")
+	require.NoError(t, err)
+	defer service.Delete(ctx, userID, app.ID)
+
+	_, err = pool.Exec(ctx, `UPDATE generation_runs SET source_path = $1 WHERE id = $2`, "sources/"+run.ID.String()+"/", run.ID)
+	require.NoError(t, err)
+
+	gotFiles, err := service.GetRunSourceFiles(ctx, userID, app.ID, run.ID)
+	require.NoError(t, err)
+	assert.Equal(t, wantFiles, gotFiles)
+}
+
 // TestAppService_Deploy_CrossUser_Integration guards against the bug where
 // deployment creation took no userID parameter at all and never verified
 // that the caller owned the target app. The ownership check must fail

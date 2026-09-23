@@ -15,6 +15,7 @@ import (
 	"github.com/arashrasoulzadeh/appgent/internal/handlers"
 	"github.com/arashrasoulzadeh/appgent/internal/logger"
 	"github.com/arashrasoulzadeh/appgent/internal/middleware"
+	"github.com/arashrasoulzadeh/appgent/internal/sandbox"
 	"github.com/arashrasoulzadeh/appgent/internal/services"
 	"github.com/arashrasoulzadeh/appgent/internal/storage"
 	temporalclient "go.temporal.io/sdk/client"
@@ -65,6 +66,7 @@ func main() {
 		os.Exit(1)
 	}
 	appService := services.NewAppService(pool, temporalClient)
+	appService.SetProvisioner(sandbox.NewStaticExportProvisioner(storageClient, cfg.ObjectStorageBucket))
 
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(tokenService, appService)
@@ -107,6 +109,7 @@ func main() {
 
 	protected.HandleFunc("GET /api/v1/apps/{app_id}/runs/{run_id}/preview", previewHandler.GetPreviewURL)
 	protected.HandleFunc("GET /api/v1/apps/{app_id}/runs/{run_id}/preview/{path...}", previewHandler.ServeRunFile)
+	protected.HandleFunc("GET /api/v1/apps/{app_id}/runs/{run_id}/files", previewHandler.GetRunFiles)
 
 	// Apply middleware chain
 	handler := middleware.CORSMiddleware(cfg.CORSAllowedOrigin)(

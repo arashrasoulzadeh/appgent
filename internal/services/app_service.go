@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/arashrasoulzadeh/appgent/internal/sandbox"
 	apptemporal "github.com/arashrasoulzadeh/appgent/internal/temporal"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -233,10 +234,22 @@ type User struct {
 type AppService struct {
 	pool     *pgxpool.Pool
 	temporal temporalclient.Client
+	// provisioner is optional (nil in tests/contexts that don't need file
+	// browsing) — set via SetProvisioner after construction, since it's
+	// only wired up by the API server's main(), not by every caller of
+	// NewAppService (avoids changing this constructor's signature for
+	// every existing call site over one feature).
+	provisioner sandbox.Provisioner
 }
 
 func NewAppService(pool *pgxpool.Pool, temporal temporalclient.Client) *AppService {
 	return &AppService{pool: pool, temporal: temporal}
+}
+
+// SetProvisioner wires the object-storage-backed provisioner GetRunSourceFiles
+// uses to let a run's owner browse its generated source files read-only.
+func (s *AppService) SetProvisioner(p sandbox.Provisioner) {
+	s.provisioner = p
 }
 
 var ErrUserNotFound = errors.New("user not found")
@@ -684,6 +697,39 @@ func (s *AppService) GetPreviewURL(ctx context.Context, userID, appID, runID uui
 	}
 	relativeURL := fmt.Sprintf("/api/v1/apps/%s/runs/%s/preview/index.html", appID, runID)
 	return relativeURL, time.Now().Add(24 * time.Hour), nil
+}
+
+// GetRunSourceFiles returns a run's raw generated source files, keyed by
+// path, for the read-only file-browser tab — never for editing (per the
+// user's own instructions: the file manager shows code, but any change
+// requires a new prompt and a regenerate/redeploy, not in-place edits,
+// which would silently diverge from what the LLM actually reasoned about
+// and never survive a later regenerate anyway).
+func (s *AppService) GetRunSourceFiles(ctx context.Context, userID, appID, runID uuid.UUID) (map[string]string, error) {
+	if s.provisioner == nil {
+		return nil, fmt.Errorf("provisioner not configured")
+	}
+	var sourcePath sql.NullString
+	err := s.pool.QueryRow(ctx, `
+		SELECT r.source_path
+		FROM generation_runs r
+		JOIN apps a ON r.app_id = a.id
+		WHERE r.id = $1 AND r.app_id = $2 AND a.user_id = $3
+	`, runID, appID, userID).Scan(&sourcePath)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrRunNotFound
+		}
+		return nil, err
+	}
+	if !sourcePath.Valid {
+		return nil, ErrNoPreview
+	}
+	files, err := s.provisioner.FetchSource(ctx, runID)
+	if err != nil {
+		return nil, fmt.Errorf("fetch source: %w", err)
+	}
+	return files, nil
 }
 
 var (

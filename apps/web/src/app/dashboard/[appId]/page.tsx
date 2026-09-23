@@ -7,7 +7,7 @@ import { formatDateTime, truncate, cn, apiErrorMessage } from "@/lib/utils"
 import {
   ChevronLeft, RotateCcw, CheckCircle,
   Loader2, FileCode, Zap,
-  Eye, Rocket, Settings, MessageSquare,
+  Eye, Rocket, Settings, MessageSquare, Folder,
 } from "lucide-react"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
@@ -51,6 +51,14 @@ export default function AppDetailPage() {
   const [regeneratePrompt, setRegeneratePrompt] = useState("")
   const [activeTab, setActiveTab] = useState("preview")
 
+  // Read-only file browser state. runFiles is keyed by the run whose files
+  // are currently loaded (filesForRunId), so switching selectedRun doesn't
+  // show stale files from a previous run while the new ones are fetching.
+  const [runFiles, setRunFiles] = useState<Record<string, string> | null>(null)
+  const [filesForRunId, setFilesForRunId] = useState<string | null>(null)
+  const [filesLoading, setFilesLoading] = useState(false)
+  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null)
+
   // Tracks the appId that each in-flight fetch was started for, so that
   // responses for a stale appId (e.g. the user navigated to a different
   // app while a request was still in flight) never overwrite state for
@@ -64,6 +72,28 @@ export default function AppDetailPage() {
       setPreviewUrl(preview_url)
     } catch (err) {
       console.error("Failed to load preview:", err)
+    }
+  }, [appId])
+
+  const loadRunFiles = useCallback(async (runId: string, forAppId: string = appId) => {
+    setFilesLoading(true)
+    try {
+      const { files } = await api.getRunFiles(forAppId, runId)
+      if (currentAppIdRef.current !== forAppId) return
+      setRunFiles(files)
+      setFilesForRunId(runId)
+      const paths = Object.keys(files).sort()
+      setSelectedFilePath(paths.length > 0 ? paths[0] : null)
+    } catch (err) {
+      console.error("Failed to load run files:", err)
+      if (currentAppIdRef.current === forAppId) {
+        setRunFiles(null)
+        setFilesForRunId(runId)
+      }
+    } finally {
+      if (currentAppIdRef.current === forAppId) {
+        setFilesLoading(false)
+      }
     }
   }, [appId])
 
@@ -162,6 +192,15 @@ export default function AppDetailPage() {
     return () => clearInterval(interval)
   }, [runInProgress, deploymentInProgress, selectedRun, loadRunDetails, loadRuns, loadDeployments])
 
+  // Lazily fetches files the first time the Files tab is opened for a given
+  // run — not on every render, and not for runs the user never inspects.
+  useEffect(() => {
+    if (activeTab !== "files" || !selectedRun) return
+    if (filesForRunId === selectedRun.id) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadRunFiles(selectedRun.id)
+  }, [activeTab, selectedRun, filesForRunId, loadRunFiles])
+
   const handleRegenerate = async (e?: React.FormEvent) => {
     e?.preventDefault()
     setRegenerating(true)
@@ -240,9 +279,12 @@ export default function AppDetailPage() {
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
         <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-          <TabsList className="grid w-full grid-cols-3">
+          <TabsList className="grid w-full grid-cols-4">
             <TabsTrigger value="preview">
               <Eye className="h-4 w-4 mr-2" /> Preview
+            </TabsTrigger>
+            <TabsTrigger value="files">
+              <Folder className="h-4 w-4 mr-2" /> Files
             </TabsTrigger>
             <TabsTrigger value="deployments">
               <Rocket className="h-4 w-4 mr-2" /> Deployments
@@ -397,6 +439,62 @@ export default function AppDetailPage() {
             ) : (
               <div className="text-center py-8">
                 <p className="text-neutral-600 dark:text-neutral-400">Select a run from History to view details</p>
+              </div>
+            )}
+          </TabsContent>
+
+          <TabsContent value="files" className="mt-6">
+            {!selectedRun ? (
+              <div className="text-center py-8">
+                <p className="text-neutral-600 dark:text-neutral-400">Select a run from History to browse its files</p>
+              </div>
+            ) : filesLoading && filesForRunId !== selectedRun.id ? (
+              <div className="flex items-center justify-center py-16">
+                <Loader2 className="h-6 w-6 animate-spin text-neutral-400" />
+              </div>
+            ) : !runFiles || Object.keys(runFiles).length === 0 ? (
+              <div className="text-center py-8">
+                <Folder className="h-12 w-12 mx-auto text-neutral-300 dark:text-neutral-700 mb-4" />
+                <p className="text-neutral-600 dark:text-neutral-400">
+                  No files available for this run yet — files appear once generation has produced source.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <p className="text-sm text-neutral-500 dark:text-neutral-400">
+                  Read-only. To change something, describe what you want in Regenerate — this view can&apos;t be edited directly.
+                </p>
+                <div className="flex gap-4 bg-white dark:bg-neutral-900 rounded-xl border border-neutral-200 dark:border-neutral-800 overflow-hidden" style={{ height: "70vh" }}>
+                  <div className="w-64 shrink-0 overflow-y-auto border-r border-neutral-200 dark:border-neutral-800 py-2">
+                    {Object.keys(runFiles).sort().map((path) => (
+                      <button
+                        key={path}
+                        onClick={() => setSelectedFilePath(path)}
+                        className={cn(
+                          "w-full text-left px-3 py-1.5 text-sm truncate font-mono",
+                          selectedFilePath === path
+                            ? "bg-primary-50 text-primary-700 dark:bg-primary-900/30 dark:text-primary-300"
+                            : "text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800/50"
+                        )}
+                        title={path}
+                      >
+                        {path}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex-1 overflow-auto">
+                    {selectedFilePath && (
+                      <>
+                        <div className="sticky top-0 px-4 py-2 text-xs font-mono text-neutral-500 dark:text-neutral-400 bg-neutral-50 dark:bg-neutral-800/50 border-b border-neutral-200 dark:border-neutral-800">
+                          {selectedFilePath}
+                        </div>
+                        <pre className="p-4 text-sm font-mono whitespace-pre-wrap break-words text-neutral-800 dark:text-neutral-200">
+                          {runFiles[selectedFilePath]}
+                        </pre>
+                      </>
+                    )}
+                  </div>
+                </div>
               </div>
             )}
           </TabsContent>

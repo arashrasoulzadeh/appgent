@@ -173,6 +173,53 @@ func (h *PreviewHandler) GetPreviewURL(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GetRunFiles returns a run's raw generated source files, keyed by path, so
+// the frontend's file-manager tab can list and display them. Read-only —
+// there is no corresponding "write" endpoint; changing a generated app is
+// always done via a new prompt and a regenerate/redeploy, never an
+// in-place edit here (an edit would silently diverge from what the LLM
+// actually generated and reasoned about, and wouldn't survive the next
+// regenerate anyway).
+func (h *PreviewHandler) GetRunFiles(w http.ResponseWriter, r *http.Request) {
+	userIDStr, ok := middleware.GetUserID(r)
+	if !ok {
+		http.Error(w, `{"error": "unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+	userID, err := uuid.Parse(userIDStr)
+	if err != nil {
+		http.Error(w, `{"error": "invalid user id"}`, http.StatusBadRequest)
+		return
+	}
+	appID, err := uuid.Parse(r.PathValue("app_id"))
+	if err != nil {
+		http.Error(w, `{"error": "invalid app id"}`, http.StatusBadRequest)
+		return
+	}
+	runID, err := uuid.Parse(r.PathValue("run_id"))
+	if err != nil {
+		http.Error(w, `{"error": "invalid run id"}`, http.StatusBadRequest)
+		return
+	}
+
+	files, err := h.appService.GetRunSourceFiles(r.Context(), userID, appID, runID)
+	if err != nil {
+		if errors.Is(err, services.ErrRunNotFound) {
+			http.Error(w, `{"error": "run not found"}`, http.StatusNotFound)
+			return
+		}
+		if errors.Is(err, services.ErrNoPreview) {
+			http.Error(w, `{"error": "source not available for this run"}`, http.StatusNotFound)
+			return
+		}
+		http.Error(w, `{"error": "failed to get run files"}`, http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"files": files})
+}
+
 // ServeRunFile streams one file from a run's published bundle. Requires
 // the same session auth as the rest of the API (a run's preview is for
 // its owner reviewing generation output, not a public share link — that's
